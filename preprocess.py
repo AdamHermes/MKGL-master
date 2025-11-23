@@ -14,8 +14,6 @@ import os.path as osp
 import os
 
 
-
-
 class Prompter(object):
 
     __slots__ = ("template", "_verbose")
