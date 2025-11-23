@@ -1,4 +1,9 @@
 import os, sys, logging, argparse, yaml, easydict
+import os
+os.environ["MPLBACKEND"] = "Agg"   # MUST be before importing matplotlib or torchdrug
+
+import matplotlib
+matplotlib.use("Agg")              # double-force safe backend
 import numpy as np
 import torch
 
