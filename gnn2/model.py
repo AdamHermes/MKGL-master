@@ -6,7 +6,6 @@ from torch_scatter import scatter_add
 from torch_geometric.nn import PNAConv
 from torch_geometric.utils import to_undirected, subgraph
 from torch_geometric.utils import degree
-from torch_geometric.utils import degree as pyg_degree
 
 #############################################
 # Helper Functions (TorchDrug → PyG)
@@ -304,7 +303,7 @@ class ConditionedPNA(nn.Module):
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
             e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
             num_nodes = hidden.size(0)
-            deg_nodes = degree(e_sub[0], num_nodes=num_nodes, dtype=hidden.dtype)
+            deg_nodes = degree(e_sub[0], num_nodes=num_nodes)
             deg_nodes = deg_nodes + 1e-6 
             new_hidden = layer(hidden, e_sub, deg=deg_nodes)
 
