@@ -314,24 +314,20 @@ class FB15k237(StandardKGCDataset):
     ]
 
     def __init__(self, path="data/datasets", version="v1", verbose=1):
-            # We ignore 'version' for the standard dataset as it has no versions
-            super(InductiveKnowledgeGraphDataset, self).__init__() 
-            
-            if not os.path.exists(path):
-                os.makedirs(path)
-            self.path = path
-            
-            files = []
-            names = ["train.txt", "valid.txt", "test.txt"]
-            for url, name in zip(self.urls, names):
-                save_file = "fb15k237_full_%s" % name
-                txt_file = os.path.join(path, save_file)
-                if not os.path.exists(txt_file):
-                    print(f"Downloading {url} to {txt_file}...")
-                    download_url(url, path, filename=save_file)
-                files.append(txt_file)
+        super().__init__()
+        if not os.path.exists(path): os.makedirs(path)
+        
+        files = []
+        for url in self.urls:
+            url = url % version
+            save_file = f"fb15k237_{version}_{os.path.basename(url)}"
+            txt_file = os.path.join(path, save_file)
+            if not os.path.exists(txt_file):
+                print(f"Downloading {url}...")
+                download_url(url, path, filename=save_file)
+            files.append(txt_file)
 
-            self.load_standard_tsvs(files, verbose=verbose)
+        self.load_standard_tsvs(files, verbose=verbose)
 
 
 class WN18RR(StandardKGCDataset):
