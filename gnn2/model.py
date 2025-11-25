@@ -68,11 +68,8 @@ class PNA(nn.Module):
         aggr = ['mean', 'max', 'min', 'std']
         scalers = ['identity', 'amplification', 'attenuation']
 
-        self.num_relations = num_relations
-        self.short_cut = True
         self.layers = nn.ModuleList()
-
-        # create layers with deg=None, will compute in forward
+        deg_placeholder = torch.ones(1)  # temp placeholder
         for _ in range(num_layers):
             self.layers.append(
                 PNAConv(
@@ -80,9 +77,10 @@ class PNA(nn.Module):
                     out_dim,
                     aggregators=aggr,
                     scalers=scalers,
-                    deg=None
+                    deg=deg_placeholder
                 )
             )
+        self.short_cut = True
 
     def forward(self, x, edge_index):
         # Compute degrees dynamically
