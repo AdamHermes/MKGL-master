@@ -37,7 +37,7 @@ trainer:
   save_total_limit: 1
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
-  evaluation_strategy: epoch
+  eval_strategy: epoch
   eval_steps: 500
   save_strategy: 'no' #epoch
   warmup_steps: 50
