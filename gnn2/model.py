@@ -390,7 +390,7 @@ class ConditionedPNA(nn.Module):
         print("rel_embeds min/max/nan:", rel_embeds.min().item(), rel_embeds.max().item(), torch.isnan(rel_embeds).any())
         print("input_embeds min/max/nan:", input_embeds.min().item(), input_embeds.max().item(), torch.isnan(input_embeds).any())
         print("init_score min/max/nan:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
-        print("Score stats Bef:", score.min().item(), score.max().item(), torch.isnan(score).any())
+        print("Score stats Bef:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
 
         # 8) aggregate / run the conditioned PNA logic (your aggregate expects graph-like object)
         # The original TorchDrug code passes a graph-like object. Here we must adapt:
