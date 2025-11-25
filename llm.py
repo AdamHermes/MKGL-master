@@ -280,7 +280,6 @@ class KGL4KGC(nn.Module):
         return pred
     
     def target(self, batch):
-        # positive triples from the batch
         pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
         batch_size = len(pos_h_index)
         graph = self.get_eval_graph(batch)  # PyG Data object
@@ -288,20 +287,21 @@ class KGL4KGC(nn.Module):
         device = pos_h_index.device
         num_nodes = graph.num_nodes
 
-        h_all, t_all = graph.edge_index  # shape [2, num_edges]
-        r_all = graph.edge_type          # shape [num_edges]
+        # Move graph tensors to the same device
+        h_all = graph.edge_index[0].to(device)
+        t_all = graph.edge_index[1].to(device)
+        r_all = graph.edge_type.to(device)  # make sure edge_type exists
 
         #########################################
         # 1. Mask for tail prediction (t unknown)
         #########################################
-        # match edges with head and relation
         mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
                 (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        matched_edges_t = mask_t.nonzero(as_tuple=False)  # [num_matches, 2]
-        edge_idx_t = matched_edges_t[:, 0]               # indices in graph
-        num_t_truth = mask_t.sum(dim=0)                  # number of matches per batch
+        matched_edges_t = mask_t.nonzero(as_tuple=False)
+        edge_idx_t = matched_edges_t[:, 0]
+        num_t_truth = mask_t.sum(dim=0)
 
-        t_truth_index = t_all[edge_idx_t]               # actual tails
+        t_truth_index = t_all[edge_idx_t]
         pos_index = torch.repeat_interleave(num_t_truth)
         t_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
         t_mask[pos_index, t_truth_index] = 0
@@ -327,6 +327,7 @@ class KGL4KGC(nn.Module):
         target = torch.cat([pos_t_index, pos_h_index], dim=0)
 
         return mask, target
+
 
         
     def predict_and_target(self, batch, all_loss=None, metric=None):
