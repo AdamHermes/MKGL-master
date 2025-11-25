@@ -1,5 +1,6 @@
 output_dir: &output_dir outputs/
 
+
 model_name: &model_name TinyLlama/TinyLlama-1.1B-Chat-v1.0
 kgl_token_length: 10
 
@@ -61,9 +62,9 @@ mkgl4kgc:
   num_negative: 32
   strict_negative: yes
   adversarial_temperature: 1
-
+  
 context_retriever:
-  llm_hidden_dim: *llm_hidden_dim
+  llm_hidden_dim: &llm_hidden_dim 4096
   r: *r
   text_encoder: pna
   kg_encoder:
@@ -74,7 +75,6 @@ context_retriever:
     num_layers: 1
     remove_one_hop: yes
     node_ratio: 0.1
-
 
 score_retriever:
   llm_hidden_dim: *llm_hidden_dim
@@ -88,4 +88,4 @@ score_retriever:
     num_layers: 6             # corresponds to TorchDrug num_layer
     remove_one_hop: yes       # keep same
     node_ratio: 0.1           # same as TorchDrug
-
+.1
