@@ -156,6 +156,7 @@ class ConditionedPNA(nn.Module):
     ###########################################
     def init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch):
         x = torch.zeros_like(x)
+        x = x.to(torch.bfloat16)
         x[t_idx] = t_emb
         x[h_idx] = h_emb
 
