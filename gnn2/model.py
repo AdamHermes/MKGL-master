@@ -299,26 +299,14 @@ class ConditionedPNA(nn.Module):
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
             e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
 
-            num_nodes = hidden.size(0)
 
             # Ensure e_sub is a proper tensor
-            if e_sub.numel() == 0:
                 # No edges selected, use default degree=1
-                deg_nodes = torch.ones(num_nodes, device=device, dtype=torch.float32)
-            else:
                 # Make sure e_sub is contiguous and 2D (2, E)
-                e_sub = e_sub.contiguous()
-                if e_sub.dim() != 2 or e_sub.size(0) != 2:
-                    raise ValueError(f"e_sub has wrong shape: {e_sub.shape}")
-
                 # Compute degree using the source nodes
-                src_nodes = e_sub[0]  # 1D tensor of source node indices
-                deg_nodes = degree(src_nodes, num_nodes=num_nodes, dtype=torch.float32)
-                deg_nodes = deg_nodes + 1e-6  # small epsilon to avoid div/0
-
 
             # 3) PNA update
-            new_hidden = layer(hidden, e_sub, deg=deg_nodes)
+            new_hidden = layer(hidden, e_sub)
 
             # Debug
             print(f"Layer {i}: new_hidden min/max/nan: {new_hidden.min().item()}, {new_hidden.max().item()}, {torch.isnan(new_hidden).any()}")
