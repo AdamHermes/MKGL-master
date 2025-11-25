@@ -61,9 +61,9 @@ if __name__ == "__main__":
     else:
         dataset = KGCDataset.load(file_path)
     tokenizer = dataset.tokenizer
-    cfg.context_retriever.kg_encoder.base_layer.num_relation = int(
+    cfg.context_retriever.kg_encoder.num_relation = int(
         dataset.kgdata.num_relation)
-    cfg.score_retriever.kg_encoder.base_layer.num_relation = int(
+    cfg.score_retriever.kg_encoder.num_relation = int(
         dataset.kgdata.num_relation)
     
     #torch.nn.Module = torch.nn._Module
