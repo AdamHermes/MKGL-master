@@ -433,6 +433,9 @@ class ConditionedPNA(nn.Module):
                             input_embeds=input_embeds,
                             rel_embeds=rel_embeds,       # shape (batch_size, dim)
                             init_score=init_score)
+        # After computing hidden or score
+        print("Score stats:", score.min().item(), score.max().item(), torch.isnan(score).any())
+
         final = score[t_index]   # t_index already shifted earlier
 
         # 10) final indexing to get scores for requested tails (t_index already shifted to repeated index)
