@@ -162,6 +162,7 @@ class ConditionedPNA(nn.Module):
 
         # score = 0 for all nodes, except head
         score = torch.zeros(batch.size(0), device=x.device)
+        score = score.to(torch.bfloat16)
         score[h_idx] = self.score(h_emb, rel_emb)
         score = score.repeat_interleave((batch == batch.unique()[0]).sum())
 
