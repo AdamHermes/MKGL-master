@@ -142,22 +142,16 @@ class MKGL(LlamaForCausalLM):
     def norm(self, x):
         return F.normalize(x, p=2, dim=1)
     
-def edge_mask(graph: Data, mask: torch.Tensor) -> Data:
-    """
-    Mimics TorchDrug's graph.edge_mask(mask)
-    Returns a new PyG Data object with only the edges selected by `mask`.
-    """
-    new_data = Data()
-    new_data.x = graph.x if hasattr(graph, 'x') else None
-    new_data.edge_index = graph.edge_index[:, mask]
-    new_data.edge_type = graph.edge_type[mask] if hasattr(graph, 'edge_type') else None
-    new_data.num_nodes = graph.num_nodes
-
-    # copy any other attributes if necessary
-    for key in graph.keys:
-        if key not in ['x', 'edge_index', 'edge_type', 'num_nodes']:
-            new_data[key] = getattr(graph, key)
+def edge_mask(graph, mask: torch.Tensor):
+    # mask: boolean tensor of size [num_edges]
+    new_data = graph.clone()
+    for key in graph.keys():  # call keys()!
+        item = getattr(graph, key)
+        if isinstance(item, torch.Tensor) and item.size(0) == graph.edge_index.size(1):
+            # edge-level attribute
+            setattr(new_data, key, item[mask])
     return new_data
+
 
 class KGL4KGC(nn.Module):
 
