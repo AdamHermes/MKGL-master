@@ -157,13 +157,13 @@ class ConditionedPNA(nn.Module):
     ###########################################
     def init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch):
         x = torch.zeros_like(x)
-        x = x.to(torch.bfloat16)
+        #x = x.to(torch.bfloat16)
         x[t_idx] = t_emb
         x[h_idx] = h_emb
 
         # score = 0 for all nodes, except head
         score = torch.zeros(batch.size(0), device=x.device)
-        score = score.to(torch.bfloat16)
+        #score = score.to(torch.bfloat16)
         score[h_idx] = self.score(h_emb, rel_emb)
         score = score.repeat_interleave((batch == batch.unique()[0]).sum())
 
