@@ -328,7 +328,10 @@ class KGL4KGC(nn.Module):
 
     def id2tokenid(self, id, split='test', entity=True):
         if entity:
-            id2rawname = np.array(self.dataset.kgdata.entity_vocab)
+            #id2rawname = np.array(self.dataset.kgdata.entity_vocab)
+            id2rawname = np.array(self.dataset.kgdata.transductive_vocab)
+            # We use the transductive vocab for both train and test
+
         else:
             id2rawname = np.array(self.dataset.kgdata.relation_vocab)
         rawname = id2rawname[id.cpu()]
