@@ -127,17 +127,41 @@ class PNA(nn.Module):
         self.short_cut = True
 
     def forward(self, x, edge_index):
-        # Compute degrees dynamically
         num_nodes = x.size(0)
+
+        # Compute degrees dynamically
         deg = degree(edge_index[0], num_nodes=num_nodes, dtype=x.dtype)
 
+        # Debug degree info
+        print("=== Degree Info ===")
+        print("deg shape:", deg.shape)
+        print("deg min/max:", deg.min().item(), deg.max().item())
+        if (deg == 0).any():
+            print("Warning: Some nodes have degree 0!")
+
         h = x
-        for conv in self.layers:
-            h_new = conv(h, edge_index, deg=deg)  # pass deg here
+        for i, conv in enumerate(self.layers):
+            # Forward
+            h_new = conv(h, edge_index, deg=deg)
+
+            # Debug layer outputs
+            print(f"--- Layer {i} ---")
+            print("h_new min/max:", h_new.min().item(), h_new.max().item())
+            print("h_new has NaN:", torch.isnan(h_new).any().item())
+
+            # Shortcut connection
             if self.short_cut:
                 h_new += h
+
+            # Debug after shortcut
+            print(f"--- Layer {i} after shortcut ---")
+            print("h min/max:", h_new.min().item(), h_new.max().item())
+            print("h has NaN:", torch.isnan(h_new).any().item())
+
             h = h_new
+
         return h
+
 
 
 
