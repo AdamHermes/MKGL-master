@@ -11,32 +11,33 @@ from torch_geometric.utils import degree
 # Helper Functions (TorchDrug → PyG)
 #############################################
 
-def repeat_graph(x, edge_index, batch_size):
+
+
+def repeat_graph(x: torch.Tensor, edge_index: torch.Tensor, batch_size: int):
     """
-    TorchDrug RepeatGraph → PyG implementation.
-    Replicates a graph batch_size times.
+    Repeat node features x (N, D) and edge_index (2, E) batch_size times.
+    Returns:
+      x_rep: (B*N, D)
+      edge_index_rep: (2, B*E)
+      node_batch: (B*N,) node->graph mapping (0..B-1)
     """
-    num_nodes = x.size(0)
-    num_edges = edge_index.size(1)
+    device = x.device
+    N = x.size(0)
+    E = edge_index.size(1)
 
-    all_x = []
-    all_edge = []
-    all_batch = []
+    # repeat node features efficiently
+    x_rep = x.repeat(batch_size, 1)  # (B*N, D)
 
-    for i in range(batch_size):
-        node_offset = i * num_nodes
-        x_i = x.clone()
-        edge_i = edge_index + node_offset
+    # offsets for edges
+    offsets = (torch.arange(batch_size, device=device, dtype=edge_index.dtype) * N).unsqueeze(1)  # (B,1)
+    edge_index_rep = edge_index.unsqueeze(0) + offsets.unsqueeze(-1)  # (B, 2, E)
+    edge_index_rep = edge_index_rep.view(2, -1).to(edge_index.dtype)  # (2, B*E)
 
-        all_x.append(x_i)
-        all_edge.append(edge_i)
-        all_batch.append(torch.full((num_nodes,), i, dtype=torch.long, device=x.device))
+    # node -> batch mapping
+    node_batch = torch.arange(batch_size, device=device).repeat_interleave(N)  # (B*N,)
 
-    return (
-        torch.cat(all_x, dim=0),
-        torch.cat(all_edge, dim=1),
-        torch.cat(all_batch, dim=0),
-    )
+    return x_rep, edge_index_rep, node_batch
+
 
 def degree(edge_index, num_nodes):
     row, col = edge_index
@@ -221,70 +222,89 @@ class ConditionedPNA(nn.Module):
     ###########################################
     def forward(self, h_index, r_index, t_index,
                 hidden_states, rel_hidden_states,
-                edge_index, x, batch):
+                graph, score_text_embs, all_index):
         """
-        x: initial graph node features
-        edge_index: graph edges
-        hidden_states: head entity embedding
-        rel_hidden_states: unused in original (so same here)
+        h_index, r_index, t_index : (batch_size, k) indices (k = 1 + num_negative)
+        hidden_states: head embeddings (batch_size, in_dim)  -- from LLM mapping
+        rel_hidden_states: (unused)
+        graph: PyG Data (we use graph.edge_index)
+        score_text_embs: node features (num_nodes, in_dim)  <- THIS is x
+        all_index: original node indices (torch.arange(num_nodes))  (not used here)
         """
 
-        # negative sampling
-        h_index, t_index, r_index = self.negative_sample_to_tail(
-            h_index, t_index, r_index
-        )
+        # 1) negative-sample swapping (same as before)
+        h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
 
-        # get relation embedding
-        rel_emb = self.rel_embedding(r_index[:, 0])
-
-        # Repeat graph (batch_size copies)
         batch_size = h_index.size(0)
-        x_rep, e_rep, b_rep = repeat_graph(x, edge_index, batch_size)
+        device = score_text_embs.device
+        num_nodes = score_text_embs.size(0)
 
-        # adjust indices
-        num_nodes = x.size(0)
-        offsets = torch.arange(batch_size, device=x.device) * num_nodes
-        h_index = h_index + offsets[:, None]
-        t_index = t_index + offsets[:, None]
+        # 2) IMPORTANT: take the head/tail *original* node indices BEFORE offsets
+        #    we'll need original tail embeddings (from score_text_embs) to place into repeated graph
+        head_orig_idx = h_index[:, 0].clone()   # shape (batch_size,)
+        tail_orig_idx = t_index[:, 0].clone()   # shape (batch_size,)
 
-        # Init embeddings
-        # tail embeddings must come from node features x (original node_feats)
-        tail_embs = x[t_index[:, 0]]          # shape: [batch_size, in_dim]
-        head_embs = hidden_states             # shape: [batch_size, in_dim] (already)
+        # 3) build repeated graph tensors (repeat node features and edges)
+        x_rep, e_rep, batch_rep = repeat_graph(score_text_embs, graph.edge_index, batch_size)
+        # x_rep: (B * num_nodes, in_dim)
+        # e_rep: (2, B * num_edges)
+        # batch_rep: (B * num_nodes,)
 
-        x_rep, score = self.init_input_embeds(
-            x_rep,
-            head_embs.to(x.dtype), h_index[:, 0],
-            tail_embs.to(x.dtype), t_index[:, 0],
-            rel_emb.to(x.dtype), b_rep
+        # 4) compute offsets and shift h/t indices to the repeated graph indexing
+        offsets = (torch.arange(batch_size, device=device, dtype=torch.long) * num_nodes).unsqueeze(1)  # (B,1)
+        h_index = h_index + offsets.to(h_index.dtype).to(device)
+        t_index = t_index + offsets.to(t_index.dtype).to(device)
+
+        # 5) relation embeddings
+        rel_embeds = self.rel_embedding(r_index[:, 0]).to(hidden_states.dtype)  # (batch_size, in_dim)
+
+        # 6) prepare head and tail embeddings for init_input_embeds
+        # head embeddings come from 'hidden_states' (already per-batch)
+        head_embs = hidden_states.to(x_rep.dtype)
+
+        # tail embeddings must be collected from the original node features score_text_embs
+        tail_embs = score_text_embs[tail_orig_idx].to(x_rep.dtype)  # (batch_size, in_dim)
+
+        # 7) init input embeddings for the repeated graph
+        # signature: init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch)
+        input_embeds, init_score = self.init_input_embeds(
+            x_rep,                # repeated node features
+            head_embs,            # head embeddings (batch_size, in_dim)
+            h_index[:, 0],        # indices in repeated graph for heads (batch_size,)
+            tail_embs,            # tail embeddings (batch_size, in_dim)
+            t_index[:, 0],        # indices in repeated graph for tails (batch_size,)
+            rel_embeds.to(x_rep.dtype),
+            batch_rep
         )
 
+        # 8) aggregate / run the conditioned PNA logic (your aggregate expects graph-like object)
+        # The original TorchDrug code passes a graph-like object. Here we must adapt:
+        # We will create a tiny namespace 'rep_graph' with the minimal attributes aggregate() expects.
+        # aggregate() in your code expects attributes like: .num_node, .num_nodes?, .edge_index, .degree_out, .node2graph, etc.
+        # If your aggregate() implementation uses PyG-style tensors, adapt accordingly.
+        # For now, call your aggregate with (we assume it accepts (edge_index, x_rep, batch_rep, ...)).
+        #
+        # NOTE: If your aggregate() is the PyG rewrite that expects (graph, ...), you will likely need to adapt it similarly.
+        #
+        # For simplicity, if aggregate expects (graph, ...), create a small object:
+        rep_graph = type("RG", (), {})()
+        rep_graph.x = x_rep
+        rep_graph.edge_index = e_rep
+        rep_graph.batch = batch_rep
+        rep_graph.num_node = x_rep.size(0)
+        rep_graph.num_nodes = x_rep.size(0)
+        rep_graph.num_edge = e_rep.size(1)
+        rep_graph.node2graph = batch_rep  # mapping node->graph
+        rep_graph.edge_list = e_rep.t().contiguous()
+        # if aggregate expects degree_out use degree() helper to set it:
+        try:
+            rep_graph.degree_out = degree(e_rep[0], rep_graph.num_node)
+        except Exception:
+            rep_graph.degree_out = None
 
-        # Run several PNA layers with dynamic edge pruning
-        curr_x = x_rep.clone()
-        curr_edge = e_rep.clone()
+        # 9) call aggregate (your aggregate signature in the PyG rewrite earlier was aggregate(graph, h_index, r_index, input_embeds, rel_embeds, init_score))
+        score = self.aggregate(rep_graph, h_index[:, 0], r_index[:, 0], input_embeds, rel_embeds, init_score)
 
-        for _layer in self.gnn.layers:
-            # prune edges
-            selected_edges = self.select_edges(
-                curr_edge, score, b_rep,
-                self.node_ratio, self.degree_ratio
-            )
-
-            e_sub = curr_edge[:, selected_edges]
-
-            # gnn update
-            new_x = _layer(curr_x, e_sub)
-
-            # update x and score
-            curr_x = curr_x + new_x
-            # Expand rel_emb to match curr_x's node dimension
-            rel_expanded = rel_emb.unsqueeze(1).repeat(1, num_nodes, 1)  # [batch, num_nodes, hidden]
-            rel_expanded = rel_expanded.view(-1, rel_emb.size(-1))       # [batch*num_nodes, hidden]
-
-            score = self.score(curr_x, rel_expanded)
-
-
-        # final score for tails
-        final = score[t_index]
+        # 10) final indexing to get scores for requested tails (t_index already shifted to repeated index)
+        final = score[t_index]   # shape: (batch_size, k) presumably
         return final

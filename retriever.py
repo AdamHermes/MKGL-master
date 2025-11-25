@@ -126,11 +126,9 @@ class ScoreRetriever(BasePNARetriever):
     def forward(self, h_id, r_id, t_id,  hidden_states, rel_hidden_states, graph, all_index, all_kgl_index):
 
         score_text_embs = super().forward(all_kgl_index)
-        node_batch = torch.zeros(score_text_embs.size(0), dtype=torch.long, device=score_text_embs.device)
-
         head_embeds = self.h_down_scaling(hidden_states) 
         rel_embeds = self.r_down_scaling(rel_hidden_states) 
-        score = self.kg_retriever(h_id, r_id, t_id, head_embeds, rel_embeds, graph.edge_index, score_text_embs,node_batch)
+        score = self.kg_retriever(h_id, r_id, t_id, head_embeds, rel_embeds, graph.edge_index, score_text_embs,all_index)
         
         return score
 
