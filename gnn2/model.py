@@ -248,11 +248,17 @@ class ConditionedPNA(nn.Module):
         t_index = t_index + offsets[:, None]
 
         # Init embeddings
+        # tail embeddings must come from node features x (original node_feats)
+        tail_embs = x[t_index[:, 0]]          # shape: [batch_size, in_dim]
+        head_embs = hidden_states             # shape: [batch_size, in_dim] (already)
+
         x_rep, score = self.init_input_embeds(
-            x_rep, hidden_states, h_index[:, 0],
-            rel_hidden_states, t_index[:, 0],
-            rel_emb, b_rep
+            x_rep,
+            head_embs.to(x.dtype), h_index[:, 0],
+            tail_embs.to(x.dtype), t_index[:, 0],
+            rel_emb.to(x.dtype), b_rep
         )
+
 
         # Run several PNA layers with dynamic edge pruning
         curr_x = x_rep.clone()
