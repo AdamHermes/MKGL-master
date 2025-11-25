@@ -370,43 +370,75 @@ class KGL4KGC(nn.Module):
     @torch.no_grad()
     def _strict_negative(self, pos_h_index, pos_t_index, pos_r_index):
         """
-        Generate strict negative samples per batch for PyG.
-        Returns neg_index: flattened negative indices for training.
+        Generate strict negative samples for heads and tails without TorchDrug.
+        Works fully in PyTorch/PyG.
+        
+        Inputs:
+            pos_h_index: (batch_size,) tensor of head indices
+            pos_t_index: (batch_size,) tensor of tail indices
+            pos_r_index: (batch_size,) tensor of relation indices
+        Output:
+            neg_index: concatenated negative indices for heads and tails
         """
         batch_size = pos_h_index.size(0)
         device = pos_h_index.device
-        num_entities = self.num_entity  # total number of nodes/entities
+        num_entity = self.num_entity  # total number of entities in KG
+        num_negative = self.num_negative  # negatives per positive
 
-        # Create masks for tails and heads
-        # Initially all True; we will mask out positive examples
-        t_mask = torch.ones(batch_size, num_entities, dtype=torch.bool, device=device)
-        h_mask = torch.ones(batch_size, num_entities, dtype=torch.bool, device=device)
+        ###########################################
+        # Tail negatives
+        ###########################################
+        # Create candidate mask for all entities
+        t_mask = torch.ones(batch_size, num_entity, dtype=torch.bool, device=device)
+        t_mask[torch.arange(batch_size, device=device), pos_t_index] = 0  # remove positive tails
 
-        # Mask out the positive tails/heads
-        for i in range(batch_size):
-            t_mask[i, pos_t_index[i]] = 0
-            h_mask[i, pos_h_index[i]] = 0
+        # Flatten candidates per batch
+        t_candidates = t_mask.nonzero(as_tuple=False)[:, 1]
+        t_counts = t_mask.sum(dim=1)  # number of candidates per batch element
 
-        # Flatten indices for candidates
-        neg_t_candidate = t_mask.nonzero(as_tuple=False)[:, 1]
-        neg_h_candidate = h_mask.nonzero(as_tuple=False)[:, 1]
+        # Sample num_negative per batch element
+        neg_t_index = []
+        offset = 0
+        for c in t_counts:
+            elems = t_candidates[offset: offset + c]
+            if len(elems) <= num_negative:
+                sampled = elems
+            else:
+                perm = torch.randperm(len(elems), device=device)[:num_negative]
+                sampled = elems[perm]
+            neg_t_index.append(sampled)
+            offset += c
+        neg_t_index = torch.cat(neg_t_index, dim=0)
 
-        # Count how many candidates per batch element
-        num_t_candidate = t_mask.sum(dim=-1)
-        num_h_candidate = h_mask.sum(dim=-1)
+        ###########################################
+        # Head negatives
+        ###########################################
+        h_mask = torch.ones(batch_size, num_entity, dtype=torch.bool, device=device)
+        h_mask[torch.arange(batch_size, device=device), pos_h_index] = 0  # remove positive heads
 
-        # Sample `self.num_negative` negatives per triple
-        neg_t_index = functional.variadic_sample(
-            neg_t_candidate, num_t_candidate, self.num_negative
-        )
-        neg_h_index = functional.variadic_sample(
-            neg_h_candidate, num_h_candidate, self.num_negative
-        )
+        h_candidates = h_mask.nonzero(as_tuple=False)[:, 1]
+        h_counts = h_mask.sum(dim=1)
 
+        neg_h_index = []
+        offset = 0
+        for c in h_counts:
+            elems = h_candidates[offset: offset + c]
+            if len(elems) <= num_negative:
+                sampled = elems
+            else:
+                perm = torch.randperm(len(elems), device=device)[:num_negative]
+                sampled = elems[perm]
+            neg_h_index.append(sampled)
+            offset += c
+        neg_h_index = torch.cat(neg_h_index, dim=0)
+
+        ###########################################
         # Concatenate head and tail negatives
+        ###########################################
         neg_index = torch.cat([neg_t_index, neg_h_index], dim=0)
 
         return neg_index
+
 
 
 
