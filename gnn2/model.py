@@ -5,6 +5,7 @@ from torch.nn import functional as F
 from torch_scatter import scatter_add
 from torch_geometric.nn import PNAConv
 from torch_geometric.utils import to_undirected, subgraph
+from torch_geometric.utils import degree
 
 #############################################
 # Helper Functions (TorchDrug → PyG)
@@ -58,6 +59,7 @@ def neighbors(edge_index, nodes):
 # PyG PNA (simple backbone)
 #############################################
 
+
 class PNA(nn.Module):
     def __init__(self, in_dim, out_dim, num_relations, num_layers=3):
         super().__init__()
@@ -66,26 +68,40 @@ class PNA(nn.Module):
 
         self.num_relations = num_relations
         self.layers = nn.ModuleList()
+        self.short_cut = True
+
+        # We will set deg=None here, and update it dynamically during forward
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.num_layers = num_layers
+        self.aggr = aggr
+        self.scalers = scalers
+        self.convs = nn.ModuleList()
         for _ in range(num_layers):
-            self.layers.append(
+            self.convs.append(
                 PNAConv(
                     in_dim,
                     out_dim,
                     aggregators=aggr,
                     scalers=scalers,
-                    deg=None
+                    deg=None  # will pass deg dynamically in forward
                 )
             )
-        self.short_cut = True
 
     def forward(self, x, edge_index):
+        # Compute degree histogram dynamically from edge_index
+        num_nodes = x.size(0)
+        deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
+
         h = x
-        for conv in self.layers:
-            new = conv(h, edge_index)
+        for conv in self.convs:
+            # Pass deg to PNAConv
+            new = conv(h, edge_index, deg=deg)
             if self.short_cut:
                 new += h
             h = new
         return h
+
 
 
 #############################################
