@@ -227,7 +227,7 @@ class KGL4KGC(nn.Module):
         graph = self.get_graph(batch).to(device)
         
         # graph feature
-        all_index = torch.arange(graph.num_node, device=device)
+        all_index = torch.arange(graph.num_nodes, device=device)
         all_kgl_index = self.id2tokenid(all_index, split=batch.split)
         
         if self.training:
@@ -291,7 +291,7 @@ class KGL4KGC(nn.Module):
         edge_index, num_t_truth = graph.match(pattern)
         t_truth_index = graph.edge_list[edge_index, 1]
         pos_index = torch.repeat_interleave(num_t_truth)
-        t_mask = torch.ones(batch_size, graph.num_node,
+        t_mask = torch.ones(batch_size, graph.num_nodes,
                             dtype=torch.bool, device=pos_h_index.device)
         t_mask[pos_index, t_truth_index] = 0
 
@@ -299,7 +299,7 @@ class KGL4KGC(nn.Module):
         edge_index, num_h_truth = graph.match(pattern)
         h_truth_index = graph.edge_list[edge_index, 0]
         pos_index = torch.repeat_interleave(num_h_truth)
-        h_mask = torch.ones(batch_size, graph.num_node,
+        h_mask = torch.ones(batch_size, graph.num_nodes,
                             dtype=torch.bool, device=pos_h_index.device)
         h_mask[pos_index, h_truth_index] = 0
 
