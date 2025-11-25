@@ -203,6 +203,12 @@ class ConditionedPNA(nn.Module):
             _, top = torch.topk(score[cols], e)
 
             selected_edges.append(eidx[top])
+            print("Score NaNs:", torch.isnan(score).any())
+            print("Edge index:", edge_index.shape)
+            print("Selected edges empty?", len(selected_edges) == 0)
+            print("k_b values:", k_b)
+            print("e values:", e)
+
 
         if len(selected_edges) == 0:
             return torch.empty(0, dtype=torch.long, device=edge_index.device)
