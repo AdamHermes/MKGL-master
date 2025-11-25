@@ -280,33 +280,54 @@ class KGL4KGC(nn.Module):
         return pred
     
     def target(self, batch):
-        # test target
+        # positive triples from the batch
         pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
-        batch_size = len(batch.h_id)
-        graph = self.get_eval_graph(batch)
+        batch_size = len(pos_h_index)
+        graph = self.get_eval_graph(batch)  # PyG Data object
 
-        any = -torch.ones_like(pos_h_index)
+        device = pos_h_index.device
+        num_nodes = graph.num_nodes
 
-        pattern = torch.stack([pos_h_index, any, pos_r_index], dim=-1)
-        edge_index, num_t_truth = graph.match(pattern)
-        t_truth_index = graph.edge_list[edge_index, 1]
+        h_all, t_all = graph.edge_index  # shape [2, num_edges]
+        r_all = graph.edge_type          # shape [num_edges]
+
+        #########################################
+        # 1. Mask for tail prediction (t unknown)
+        #########################################
+        # match edges with head and relation
+        mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
+                (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
+        matched_edges_t = mask_t.nonzero(as_tuple=False)  # [num_matches, 2]
+        edge_idx_t = matched_edges_t[:, 0]               # indices in graph
+        num_t_truth = mask_t.sum(dim=0)                  # number of matches per batch
+
+        t_truth_index = t_all[edge_idx_t]               # actual tails
         pos_index = torch.repeat_interleave(num_t_truth)
-        t_mask = torch.ones(batch_size, graph.num_nodes,
-                            dtype=torch.bool, device=pos_h_index.device)
+        t_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
         t_mask[pos_index, t_truth_index] = 0
 
-        pattern = torch.stack([any, pos_t_index, pos_r_index], dim=-1)
-        edge_index, num_h_truth = graph.match(pattern)
-        h_truth_index = graph.edge_list[edge_index, 0]
+        #########################################
+        # 2. Mask for head prediction (h unknown)
+        #########################################
+        mask_h = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
+                (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
+        matched_edges_h = mask_h.nonzero(as_tuple=False)
+        edge_idx_h = matched_edges_h[:, 0]
+        num_h_truth = mask_h.sum(dim=0)
+
+        h_truth_index = h_all[edge_idx_h]
         pos_index = torch.repeat_interleave(num_h_truth)
-        h_mask = torch.ones(batch_size, graph.num_nodes,
-                            dtype=torch.bool, device=pos_h_index.device)
+        h_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
         h_mask[pos_index, h_truth_index] = 0
 
-        mask = torch.cat([t_mask, h_mask])
-        target = torch.cat([pos_t_index, pos_h_index])
+        #########################################
+        # 3. Combine masks and targets
+        #########################################
+        mask = torch.cat([t_mask, h_mask], dim=0)
+        target = torch.cat([pos_t_index, pos_h_index], dim=0)
 
         return mask, target
+
         
     def predict_and_target(self, batch, all_loss=None, metric=None):
         return self.predict(batch, all_loss, metric), self.target(batch)
