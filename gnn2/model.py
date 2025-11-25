@@ -300,26 +300,42 @@ class ConditionedPNA(nn.Module):
 
         # iterate layers
         for i, layer in enumerate(self.gnn.layers):
+            # 1) Select edges
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
             e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
+
             num_nodes = hidden.size(0)
-            deg_nodes = degree(e_sub[0], num_nodes=num_nodes)
-            deg_nodes = deg_nodes + 1e-6 
+
+            # 2) Compute degrees safely
+            if e_sub.numel() == 0:
+                deg_nodes = torch.ones(num_nodes, device=device, dtype=torch.float32)  # fallback
+            else:
+                # ensure e_sub shape is (2, E)
+                if isinstance(e_sub, (tuple, list)):
+                    e_sub = torch.stack(e_sub, dim=0)  # shape (2, E)
+                src_nodes = e_sub[0]
+                deg_nodes = degree(src_nodes, num_nodes=num_nodes, dtype=torch.float32)
+                deg_nodes = deg_nodes + 1e-6  # avoid division by zero
+
+            # 3) PNA update
             new_hidden = layer(hidden, e_sub, deg=deg_nodes)
 
+            # Debug
             print(f"Layer {i}: new_hidden min/max/nan: {new_hidden.min().item()}, {new_hidden.max().item()}, {torch.isnan(new_hidden).any()}")
 
+            # 4) Update hidden
             if e_sub.size(1) > 0:
-                out_deg_sub = torch.zeros(num_nodes_rep, device=device, dtype=torch.long)
-                out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device, dtype=torch.long))
+                out_deg_sub = torch.zeros(num_nodes_rep, device=device, dtype=torch.float32)
+                out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device, dtype=torch.float32))
                 node_out = torch.nonzero(out_deg_sub > 0, as_tuple=True)[0]
-                hidden[node_out] = (hidden[node_out] + new_hidden[node_out]).type(hidden.dtype)
+                hidden[node_out] = hidden[node_out] + new_hidden[node_out]
             else:
                 hidden = hidden + new_hidden
 
-            # recompute score
+            # 5) Recompute score
             score = self.score(hidden, rel_per_node).type(score.dtype)
             print(f"Layer {i}: score min/max/nan: {score.min().item()}, {score.max().item()}, {torch.isnan(score).any()}")
+
 
 
         return score
