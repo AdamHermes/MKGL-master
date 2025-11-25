@@ -1,40 +1,19 @@
-## [MGKL: Mastery of a Three-Word Language](https://openreview.net/forum?id=eqMNwXvOqn)
-![](https://img.shields.io/badge/version-1.0.0-blue)
-[![license](https://img.shields.io/github/license/mashape/apistatus.svg?maxAge=2592000)](https://github.com/zjukg/MKGL)
-[![Pytorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?e&logo=PyTorch&logoColor=white)](https://pytorch.org/)
-[![HuggingFace](https://img.shields.io/badge/HuggingFace-orange)](https://huggingface.co/)
-[![NeurIPS 2024](https://img.shields.io/badge/NeurIPS-2024-%23bd9f65?labelColor=%23bea066&color=%23ffffff)](https://neurips.cc/)
-
-Welcome to the repository for the model of KG Language (MKGL). This project investigates the potential of LLMs in understanding and interacting with knowledge graphs, a domain that has received limited exploration in the context of NLP.
-
-
-<div align="center">
-    <img src="https://github.com/zjukg/MKGL/blob/master/imgs/arch.jpg" width="85%" height="auto" />
-</div>
-
-### Overview
-Large language models (LLMs) have significantly advanced performance across a spectrum of natural language processing (NLP) tasks. Yet, their application to knowledge graphs (KGs), which describe facts in the form of triplets and allow minimal hallucinations, remains an underexplored frontier. In this project, we investigate the integration of LLMs with KGs by introducing a specialized KG Language (KGL), where a sentence precisely consists of an entity noun, a relation verb, and ends with another entity noun. 
-
-<div align="center">
-    <img src="https://github.com/zjukg/MKGL/blob/master/imgs/klora.jpg" width="85%" height="auto" />
-</div>
-
-
 ### Environment
+
+Require Python 3.12
 
 To run this project, please first install all required packages:
 
 ```
-pip install --upgrade pandas transformers peft==0.9 bitsandbytes swifter deepspeed easydict pyyaml
+pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 ```
 
-please kindly install the pyg packages via wheels, which is much faster:
-
+pip install torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
 ```
-pip install --find-links MKGL/pyg_wheels/ torch-scatter torch-sparse torchdrug
+pip install -r requirements.txt
 ```
 
-The installed (not required) package details can be found in env.yaml.
+
 
 ### Preprocessing
 
