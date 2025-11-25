@@ -250,12 +250,12 @@ class ConditionedPNA(nn.Module):
 
             # update x and score
             curr_x = curr_x + new_x
-            print("curr_x shape:", curr_x.shape)
-            print("rel_emb shape:", rel_emb.shape)
-            print("num_nodes:", num_nodes)
-            print("repeat_interleave result shape:", rel_emb.repeat_interleave(num_nodes).shape)
+            # Expand rel_emb to match curr_x's node dimension
+            rel_expanded = rel_emb.unsqueeze(1).repeat(1, num_nodes, 1)  # [batch, num_nodes, hidden]
+            rel_expanded = rel_expanded.view(-1, rel_emb.size(-1))       # [batch*num_nodes, hidden]
 
-            score = self.score(curr_x, rel_emb.repeat_interleave(num_nodes))
+            score = self.score(curr_x, rel_expanded)
+
 
         # final score for tails
         final = score[t_index]
