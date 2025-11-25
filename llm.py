@@ -9,7 +9,7 @@ from torch.utils import data as torch_data
 from transformers import LlamaForCausalLM, LlamaConfig
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
-from torchdrug import core, tasks
+#from torchdrug import core, tasks
 from gnn.model import PNA
 from retriever import *
 

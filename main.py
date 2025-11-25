@@ -17,11 +17,13 @@ from peft import (
     get_peft_model,
 )
 from accelerate import Accelerator
-from torchdrug.utils import comm, pretty
+
+import yaml
+
 
 from llm import *
 from collector import *
-from preprocess import *
+from preprocess_new import *
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='data preprocessing')
@@ -32,12 +34,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", "-s", type=str,
                         default=42)
     args = parser.parse_args()
-    
+    accelerator = Accelerator()
+    rank = accelerator.process_index
     with open(args.config, "r") as f:
         cfg = easydict.EasyDict(yaml.safe_load(f))
         if args.version:
             cfg.dataset.version = args.version
-    torch.manual_seed(args.seed + comm.get_rank())
+    torch.manual_seed(args.seed + rank)
 
     config_name = args.config.split('/')[-1].split('.')[0]
     if hasattr(cfg.dataset, 'version'):
@@ -46,9 +49,9 @@ if __name__ == "__main__":
     cfg.trainer.output_dir += config_name
     
     
-    if comm.get_rank() == 0:
+    if rank == 0:
         print("Config file: %s" % args.config)
-        print(pretty.format(cfg))
+        print(yaml.dump(cfg, sort_keys=False))
     
 
     saved_dir = 'data/preprocessed/'
@@ -74,7 +77,7 @@ if __name__ == "__main__":
     kgl2token = torch.tensor(np.stack(dataset.vocab_df.text_token_ids)[:, :cfg.kgl_token_length])     
     model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg) 
     
-    if comm.get_rank() == 0:
+    if rank == 0:
         print(model.print_trainable_parameters())
         print(model)
 
@@ -88,7 +91,7 @@ if __name__ == "__main__":
     data_loader = MKGLDataCollector(dataset)
     
     training_args = TrainingArguments(**cfg.trainer)
-    if comm.get_rank() == 0:
+    if rank == 0:
         print(training_args)
 
 
@@ -108,7 +111,7 @@ if __name__ == "__main__":
                 raise ValueError("Unknown metric `%s`" % _metric)
 
             results[_metric] = score
-        if comm.get_rank() == 0:
+        if rank == 0:
             print(results)
         return results
 
