@@ -174,23 +174,41 @@ class ConditionedPNA(nn.Module):
     ###########################################
     def select_edges(self, edge_index, score, batch, node_ratio, degree_ratio):
         """
-        PyG rewrite of TorchDrug's select_edges().
+        Memory-safe edge selection (PyG rewrite).
+        Performs per-batch top-k instead of global top-k.
         """
-        num_nodes = score.size(0)
-        k = int(node_ratio * num_nodes)
 
-        # top-k nodes
-        _, idx = torch.topk(score, k)
-        selected = idx
+        selected_edges = []
 
-        # neighbors of selected nodes
-        eidx, cols = neighbors(edge_index, selected)
+        # loop over each graph instance in the minibatch
+        for b in batch.unique():
+            mask = (batch == b)                    # nodes belonging to graph b
+            nodes_b = mask.nonzero(as_tuple=True)[0]
 
-        # top edges by score on neighbor nodes
-        e = int(len(eidx) * degree_ratio)
-        _, top = torch.topk(score[cols], e)
+            scores_b = score[nodes_b]
+            k_b = max(1, int(self.node_ratio * nodes_b.numel()))
 
-        return eidx[top]
+            # top-k nodes of this graph
+            _, idx_b = torch.topk(scores_b, k_b)
+            selected_nodes = nodes_b[idx_b]
+
+            # gather neighbors
+            eidx, cols = neighbors(edge_index, selected_nodes)
+
+            if len(eidx) == 0:
+                continue  # skip empty subgraphs
+
+            # pick top edges among neighbors by score
+            e = max(1, int(len(eidx) * self.degree_ratio))
+            _, top = torch.topk(score[cols], e)
+
+            selected_edges.append(eidx[top])
+
+        if len(selected_edges) == 0:
+            return torch.empty(0, dtype=torch.long, device=edge_index.device)
+
+        return torch.cat(selected_edges)
+
 
     ###########################################
     # main forward
