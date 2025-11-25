@@ -303,8 +303,10 @@ class ConditionedPNA(nn.Module):
         for i, layer in enumerate(self.gnn.layers):
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
             e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
-
-            new_hidden = layer(hidden, e_sub)
+            num_nodes = hidden.size(0)
+            deg_nodes = degree(e_sub[0], num_nodes=num_nodes, dtype=hidden.dtype)
+            deg_nodes = deg_nodes + 1e-6 
+            new_hidden = layer(hidden, e_sub, deg=deg_nodes)
 
             print(f"Layer {i}: new_hidden min/max/nan: {new_hidden.min().item()}, {new_hidden.max().item()}, {torch.isnan(new_hidden).any()}")
 
