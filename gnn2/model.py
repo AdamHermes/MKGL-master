@@ -60,13 +60,10 @@ def neighbors(edge_index, nodes):
 #############################################
 
 
-import torch
-from torch import nn
-from torch_geometric.nn import PNAConv
-from torch_geometric.utils import degree
+
 
 class PNA(nn.Module):
-    def __init__(self, in_dim, out_dim, num_relations, edge_index, num_layers=3):
+    def __init__(self, in_dim, out_dim, num_relations, num_layers=3):
         super().__init__()
         aggr = ['mean', 'max', 'min', 'std']
         scalers = ['identity', 'amplification', 'attenuation']
@@ -75,10 +72,7 @@ class PNA(nn.Module):
         self.short_cut = True
         self.layers = nn.ModuleList()
 
-        # Compute degrees once from edge_index
-        num_nodes = edge_index.max().item() + 1
-        deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
-
+        # create layers with deg=None, will compute in forward
         for _ in range(num_layers):
             self.layers.append(
                 PNAConv(
@@ -86,18 +80,23 @@ class PNA(nn.Module):
                     out_dim,
                     aggregators=aggr,
                     scalers=scalers,
-                    deg=deg
+                    deg=None
                 )
             )
 
     def forward(self, x, edge_index):
+        # Compute degrees dynamically
+        num_nodes = x.size(0)
+        deg = degree(edge_index[0], num_nodes=num_nodes, dtype=x.dtype)
+
         h = x
         for conv in self.layers:
-            h_new = conv(h, edge_index)
+            h_new = conv(h, edge_index, deg=deg)  # pass deg here
             if self.short_cut:
                 h_new += h
             h = h_new
         return h
+
 
 
 
