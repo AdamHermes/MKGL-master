@@ -5,6 +5,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils import data as torch_data
+from torch_geometric.data import Data
 
 from transformers import LlamaForCausalLM, LlamaConfig
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
@@ -140,6 +141,23 @@ class MKGL(LlamaForCausalLM):
     
     def norm(self, x):
         return F.normalize(x, p=2, dim=1)
+    
+def edge_mask(graph: Data, mask: torch.Tensor) -> Data:
+    """
+    Mimics TorchDrug's graph.edge_mask(mask)
+    Returns a new PyG Data object with only the edges selected by `mask`.
+    """
+    new_data = Data()
+    new_data.x = graph.x if hasattr(graph, 'x') else None
+    new_data.edge_index = graph.edge_index[:, mask]
+    new_data.edge_type = graph.edge_type[mask] if hasattr(graph, 'edge_type') else None
+    new_data.num_nodes = graph.num_nodes
+
+    # copy any other attributes if necessary
+    for key in graph.keys:
+        if key not in ['x', 'edge_index', 'edge_type', 'num_nodes']:
+            new_data[key] = getattr(graph, key)
+    return new_data
 
 class KGL4KGC(nn.Module):
 
@@ -306,11 +324,12 @@ class KGL4KGC(nn.Module):
             dataset = train_set
         self.num_entity = dataset.num_entity
         self.num_relation = dataset.num_relation
-        fact_mask = torch.ones(len(dataset), dtype=torch.bool)
-        fact_mask[valid_set.indices] = 0
-        fact_mask[test_set.indices] = 0
+        num_edges = dataset.graph.edge_index.size(1)
+        fact_mask = torch.ones(num_edges, dtype=torch.bool)  # start with all True
+        fact_mask[valid_set.indices] = False
+        fact_mask[test_set.indices] = False
         self.graph = dataset.graph
-        self.fact_graph = dataset.graph.edge_mask(fact_mask)
+        self.fact_graph = edge_mask(dataset.graph, fact_mask)
         return train_set, valid_set, test_set
 
     def id2tokenid(self, id, split='test', entity=True):
