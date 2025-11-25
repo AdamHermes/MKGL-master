@@ -306,6 +306,8 @@ class ConditionedPNA(nn.Module):
                 # Compute degree using the source nodes
 
             # 3) PNA update
+            print("input_embeds min/max/nan:", hidden.min().item(), hidden.max().item(), torch.isnan(hidden).any())
+
             new_hidden = layer(hidden, e_sub)
 
             # Debug
