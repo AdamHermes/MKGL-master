@@ -382,6 +382,12 @@ class KGL4KGC(nn.Module):
         #########################################
         # 1. Candidate tails
         #########################################
+        print("h_all shape:", h_all.shape, "device:", h_all.device)
+        print("t_all shape:", t_all.shape, "device:", t_all.device)
+        print("pos_h_index shape:", pos_h_index.shape, "device:", pos_h_index.device)
+        print("pos_t_index shape:", pos_t_index.shape, "device:", pos_t_index.device)
+        print("pos_r_index shape:", pos_r_index.shape, "device:", pos_r_index.device)
+
         mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
                 (edge_type.unsqueeze(1) == pos_r_index.unsqueeze(0))
         matched_edges_t = mask_t.nonzero(as_tuple=False)

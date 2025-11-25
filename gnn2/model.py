@@ -136,8 +136,6 @@ class ConditionedPNA(nn.Module):
     # scoring
     ###########################################
     def score(self, hidden, rel):
-        print("hidden shape:", hidden.shape)
-        print("rel shape:", rel.shape)
         h = torch.cat([hidden, rel], dim=-1)
         heur = self.linear(h)
         x = heur * hidden
