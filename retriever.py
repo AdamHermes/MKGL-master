@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torchdrug import core
-from gnn.model import *
+#from torchdrug import core
+from gnn2.model import *
 
 
 
@@ -101,8 +101,8 @@ class ScoreRetriever(BasePNARetriever):
     
     def __init__(self, config, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
-        self.kg_retriever = core.Configurable.load_config_dict(config.kg_encoder)
-        # self.kg_retriever = ConditionedPNA(config.kg_encoder)
+        #self.kg_retriever = core.Configurable.load_config_dict(config.kg_encoder)
+        self.kg_retriever = ConditionedPNA(config.kg_encoder)
         self.h_down_scaling = nn.Linear(
                 self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
         self.r_down_scaling = nn.Linear(

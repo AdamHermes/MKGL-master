@@ -10,7 +10,7 @@ from transformers import LlamaForCausalLM, LlamaConfig
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
 #from torchdrug import core, tasks
-from gnn.model import PNA
+#from gnn.model import PNA
 from retriever import *
 
 class MKGLConfig(LlamaConfig):
