@@ -369,57 +369,45 @@ class KGL4KGC(nn.Module):
 
     @torch.no_grad()
     def _strict_negative(self, pos_h_index, pos_t_index, pos_r_index):
-        batch_size = len(pos_h_index)
+        """
+        Generate strict negative samples per batch for PyG.
+        Returns neg_index: flattened negative indices for training.
+        """
+        batch_size = pos_h_index.size(0)
         device = pos_h_index.device
+        num_entities = self.num_entity  # total number of nodes/entities
 
-        num_entities = self.num_entity  # total number of entities
-        edge_index = self.fact_graph.edge_index.to(device)  # shape [2, num_edges]
-        edge_type = self.fact_graph.edge_type.to(device)    # shape [num_edges]
-
-        h_all = edge_index[0]
-        t_all = edge_index[1]
-
-        #########################################
-        # 1. Candidate tails
-        #########################################
-        print("h_all shape:", h_all.shape, "device:", h_all.device)
-        print("t_all shape:", t_all.shape, "device:", t_all.device)
-        print("pos_h_index shape:", pos_h_index.shape, "device:", pos_h_index.device)
-        print("pos_t_index shape:", pos_t_index.shape, "device:", pos_t_index.device)
-        print("pos_r_index shape:", pos_r_index.shape, "device:", pos_r_index.device)
-
-        mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
-                (edge_type.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        matched_edges_t = mask_t.nonzero(as_tuple=False)
-        t_truth_index = t_all[matched_edges_t[:, 0]]
-
+        # Create masks for tails and heads
+        # Initially all True; we will mask out positive examples
         t_mask = torch.ones(batch_size, num_entities, dtype=torch.bool, device=device)
-        t_mask[torch.arange(batch_size, device=device).repeat_interleave(mask_t.sum(dim=0)), t_truth_index] = 0
-
-        neg_t_candidate = t_mask.nonzero()[:, 1]
-        num_t_candidate = t_mask.sum(dim=-1)
-        neg_t_index = functional.variadic_sample(neg_t_candidate, num_t_candidate, self.num_negative)
-
-        #########################################
-        # 2. Candidate heads
-        #########################################
-        mask_h = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
-                (edge_type.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        matched_edges_h = mask_h.nonzero(as_tuple=False)
-        h_truth_index = h_all[matched_edges_h[:, 0]]
-
         h_mask = torch.ones(batch_size, num_entities, dtype=torch.bool, device=device)
-        h_mask[torch.arange(batch_size, device=device).repeat_interleave(mask_h.sum(dim=0)), h_truth_index] = 0
 
-        neg_h_candidate = h_mask.nonzero()[:, 1]
+        # Mask out the positive tails/heads
+        for i in range(batch_size):
+            t_mask[i, pos_t_index[i]] = 0
+            h_mask[i, pos_h_index[i]] = 0
+
+        # Flatten indices for candidates
+        neg_t_candidate = t_mask.nonzero(as_tuple=False)[:, 1]
+        neg_h_candidate = h_mask.nonzero(as_tuple=False)[:, 1]
+
+        # Count how many candidates per batch element
+        num_t_candidate = t_mask.sum(dim=-1)
         num_h_candidate = h_mask.sum(dim=-1)
-        neg_h_index = functional.variadic_sample(neg_h_candidate, num_h_candidate, self.num_negative)
 
-        #########################################
-        # 3. Combine
-        #########################################
-        neg_index = torch.cat([neg_t_index, neg_h_index])
+        # Sample `self.num_negative` negatives per triple
+        neg_t_index = functional.variadic_sample(
+            neg_t_candidate, num_t_candidate, self.num_negative
+        )
+        neg_h_index = functional.variadic_sample(
+            neg_h_candidate, num_h_candidate, self.num_negative
+        )
+
+        # Concatenate head and tail negatives
+        neg_index = torch.cat([neg_t_index, neg_h_index], dim=0)
+
         return neg_index
+
 
 
 
