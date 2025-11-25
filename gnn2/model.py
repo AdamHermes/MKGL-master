@@ -136,10 +136,13 @@ class ConditionedPNA(nn.Module):
     # scoring
     ###########################################
     def score(self, hidden, rel):
+        print("hidden shape:", hidden.shape)
+        print("rel shape:", rel.shape)
         h = torch.cat([hidden, rel], dim=-1)
         heur = self.linear(h)
         x = heur * hidden
         return self.mlp(x).squeeze(-1)
+
 
     ###########################################
     # negative sample swapping
@@ -247,6 +250,11 @@ class ConditionedPNA(nn.Module):
 
             # update x and score
             curr_x = curr_x + new_x
+            print("curr_x shape:", curr_x.shape)
+            print("rel_emb shape:", rel_emb.shape)
+            print("num_nodes:", num_nodes)
+            print("repeat_interleave result shape:", rel_emb.repeat_interleave(num_nodes).shape)
+
             score = self.score(curr_x, rel_emb.repeat_interleave(num_nodes))
 
         # final score for tails
