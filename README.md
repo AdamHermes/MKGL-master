@@ -7,8 +7,9 @@ To run this project, please first install all required packages:
 ```
 pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 ```
-
+```
 pip install torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+```
 ```
 pip install -r requirements.txt
 ```
