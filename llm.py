@@ -232,9 +232,9 @@ class KGL4KGC(nn.Module):
         
         if self.training:
             # train
-            #neg_index = self._strict_negative(
-            #    pos_h_index, pos_t_index, pos_r_index)
-            neg_t_index, neg_h_index = self._strict_negative(pos_h_index, pos_t_index, pos_r_index)
+            neg_index = self._strict_negative(
+               pos_h_index, pos_t_index, pos_r_index)
+            #neg_t_index, neg_h_index = self._strict_negative(pos_h_index, pos_t_index, pos_r_index)
 
             h_index = pos_h_index.unsqueeze(-1).repeat(2,
                                                        self.num_negative + 1)
@@ -242,8 +242,8 @@ class KGL4KGC(nn.Module):
                                                        self.num_negative + 1)
             r_index = pos_r_index.unsqueeze(-1).repeat(2,
                                                        self.num_negative + 1)
-            t_index[:, 1:] = neg_t_index
-            h_index[:, 1:] = neg_h_index
+            t_index[:batch_size, 1:] = neg_index[:batch_size]        # tail negatives
+            h_index[batch_size:, 1:] = neg_index[batch_size:]        # head negatives
 
             
             h_id, r_id, t_id = h_index, r_index, t_index
@@ -420,9 +420,9 @@ class KGL4KGC(nn.Module):
         # Concatenate heads and tails if needed
         ###########################################
         # Optional: depends on your model usage
-        # neg_index = torch.cat([neg_t_index, neg_h_index], dim=0)
+        neg_index = torch.cat([neg_t_index, neg_h_index], dim=0)
 
-        return neg_t_index, neg_h_index
+        return neg_index
 
 
 
