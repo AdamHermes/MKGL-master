@@ -424,7 +424,7 @@ class ConditionedPNA(nn.Module):
         # score = self.aggregate(graph, ...)
 
         # with PyG tensors:
-        score = self.aggregate_pyg(self,
+        score = self.aggregate_pyg(
                             x_rep=x_rep,
                             e_rep=e_rep,
                             batch_rep=batch_rep,
