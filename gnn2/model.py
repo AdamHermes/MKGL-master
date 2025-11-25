@@ -300,36 +300,26 @@ class ConditionedPNA(nn.Module):
             deg_out_rep = torch.bincount(src, minlength=num_nodes_rep).to(device)
 
         # iterate layers
-        for layer in self.gnn.layers:
-            # 1) select edges indices (columns in e_rep)
+        for i, layer in enumerate(self.gnn.layers):
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
-            if sel_edge_idx.numel() == 0:
-                # nothing selected: break or continue with full graph — here we continue but with full graph update
-                e_sub = e_rep
-            else:
-                e_sub = e_rep[:, sel_edge_idx]  # subgraph edge_index
+            e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
 
-            # 2) perform GNN update on subgraph edges
-            # layer expects (x, edge_index) and returns new node features (B*N, dim)
-            new_hidden = layer(hidden, e_sub)  # shape (B*N, dim)
+            new_hidden = layer(hidden, e_sub)
 
-            # 3) update only nodes that have outgoing edges in subgraph
+            print(f"Layer {i}: new_hidden min/max/nan: {new_hidden.min().item()}, {new_hidden.max().item()}, {torch.isnan(new_hidden).any()}")
+
             if e_sub.size(1) > 0:
                 out_deg_sub = torch.zeros(num_nodes_rep, device=device, dtype=torch.long)
                 out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device, dtype=torch.long))
-                out_mask = out_deg_sub > 0
-                node_out = torch.nonzero(out_mask, as_tuple=True)[0]
-                # add new features to those node indices
+                node_out = torch.nonzero(out_deg_sub > 0, as_tuple=True)[0]
                 hidden[node_out] = (hidden[node_out] + new_hidden[node_out]).type(hidden.dtype)
             else:
-                # if no edges selected, (option) use the full new_hidden update
                 hidden = hidden + new_hidden
 
-            # 4) recompute score for all nodes using rel_per_node
-            # self.score expects (hidden_nodes, rel_for_those_nodes)
-            # and outputs a scalar per node
-            # rel_for_node = rel_per_node (already matched shape)
+            # recompute score
             score = self.score(hidden, rel_per_node).type(score.dtype)
+            print(f"Layer {i}: score min/max/nan: {score.min().item()}, {score.max().item()}, {torch.isnan(score).any()}")
+
 
         return score
 
@@ -400,6 +390,7 @@ class ConditionedPNA(nn.Module):
         print("rel_embeds min/max/nan:", rel_embeds.min().item(), rel_embeds.max().item(), torch.isnan(rel_embeds).any())
         print("input_embeds min/max/nan:", input_embeds.min().item(), input_embeds.max().item(), torch.isnan(input_embeds).any())
         print("init_score min/max/nan:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
+        print("Score stats Bef:", score.min().item(), score.max().item(), torch.isnan(score).any())
 
         # 8) aggregate / run the conditioned PNA logic (your aggregate expects graph-like object)
         # The original TorchDrug code passes a graph-like object. Here we must adapt:
@@ -411,20 +402,20 @@ class ConditionedPNA(nn.Module):
         # NOTE: If your aggregate() is the PyG rewrite that expects (graph, ...), you will likely need to adapt it similarly.
         #
         # For simplicity, if aggregate expects (graph, ...), create a small object:
-        rep_graph = type("RG", (), {})()
-        rep_graph.x = x_rep
-        rep_graph.edge_index = e_rep
-        rep_graph.batch = batch_rep
-        rep_graph.num_node = x_rep.size(0)
-        rep_graph.num_nodes = x_rep.size(0)
-        rep_graph.num_edge = e_rep.size(1)
-        rep_graph.node2graph = batch_rep  # mapping node->graph
-        rep_graph.edge_list = e_rep.t().contiguous()
-        # if aggregate expects degree_out use degree() helper to set it:
-        try:
-            rep_graph.degree_out = degree(e_rep[0], rep_graph.num_node)
-        except Exception:
-            rep_graph.degree_out = None
+        # rep_graph = type("RG", (), {})()
+        # rep_graph.x = x_rep
+        # rep_graph.edge_index = e_rep
+        # rep_graph.batch = batch_rep
+        # rep_graph.num_node = x_rep.size(0)
+        # rep_graph.num_nodes = x_rep.size(0)
+        # rep_graph.num_edge = e_rep.size(1)
+        # rep_graph.node2graph = batch_rep  # mapping node->graph
+        # rep_graph.edge_list = e_rep.t().contiguous()
+        # # if aggregate expects degree_out use degree() helper to set it:
+        # try:
+        #     rep_graph.degree_out = degree(e_rep[0], rep_graph.num_node)
+        # except Exception:
+        #     rep_graph.degree_out = None
 
         # 9) call aggregate (your aggregate signature in the PyG rewrite earlier was aggregate(graph, h_index, r_index, input_embeds, rel_embeds, init_score))
         # previously:
