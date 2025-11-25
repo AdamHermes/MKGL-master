@@ -300,7 +300,7 @@ class ConditionedPNA(nn.Module):
             deg_out_rep = torch.bincount(src, minlength=num_nodes_rep).to(device)
 
         # iterate layers
-        for layer in self.layers:
+        for layer in self.gnn.layers:
             # 1) select edges indices (columns in e_rep)
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
             if sel_edge_idx.numel() == 0:
