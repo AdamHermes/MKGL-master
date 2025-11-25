@@ -347,14 +347,7 @@ class ConditionedPNA(nn.Module):
         score_text_embs: node features (num_nodes, in_dim)  <- THIS is x
         all_index: original node indices (torch.arange(num_nodes))  (not used here)
         """
-        print("=== Forward: input stats ===")
-        print("x_rep min/max/nan:", x_rep.min().item(), x_rep.max().item(), torch.isnan(x_rep).any())
-        print("head_embs min/max/nan:", head_embs.min().item(), head_embs.max().item(), torch.isnan(head_embs).any())
-        print("tail_embs min/max/nan:", tail_embs.min().item(), tail_embs.max().item(), torch.isnan(tail_embs).any())
-        print("rel_embeds min/max/nan:", rel_embeds.min().item(), rel_embeds.max().item(), torch.isnan(rel_embeds).any())
-        print("input_embeds min/max/nan:", input_embeds.min().item(), input_embeds.max().item(), torch.isnan(input_embeds).any())
-        print("init_score min/max/nan:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
-
+        
 
         # 1) negative-sample swapping (same as before)
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
@@ -400,6 +393,13 @@ class ConditionedPNA(nn.Module):
             rel_embeds.to(x_rep.dtype),
             batch_rep
         )
+        print("=== Forward: input stats ===")
+        print("x_rep min/max/nan:", x_rep.min().item(), x_rep.max().item(), torch.isnan(x_rep).any())
+        print("head_embs min/max/nan:", head_embs.min().item(), head_embs.max().item(), torch.isnan(head_embs).any())
+        print("tail_embs min/max/nan:", tail_embs.min().item(), tail_embs.max().item(), torch.isnan(tail_embs).any())
+        print("rel_embeds min/max/nan:", rel_embeds.min().item(), rel_embeds.max().item(), torch.isnan(rel_embeds).any())
+        print("input_embeds min/max/nan:", input_embeds.min().item(), input_embeds.max().item(), torch.isnan(input_embeds).any())
+        print("init_score min/max/nan:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
 
         # 8) aggregate / run the conditioned PNA logic (your aggregate expects graph-like object)
         # The original TorchDrug code passes a graph-like object. Here we must adapt:
