@@ -370,33 +370,51 @@ class KGL4KGC(nn.Module):
     @torch.no_grad()
     def _strict_negative(self, pos_h_index, pos_t_index, pos_r_index):
         batch_size = len(pos_h_index)
-        any = -torch.ones_like(pos_h_index)
+        device = pos_h_index.device
 
-        pattern = torch.stack([pos_h_index, any, pos_r_index], dim=-1)
-        # pattern = pattern[:batch_size // 2]
-        edge_index, num_t_truth = self.fact_graph.match(pattern)
-        t_truth_index = self.fact_graph.edge_list[edge_index, 1]
-        pos_index = torch.repeat_interleave(num_t_truth)
-        t_mask = torch.ones(len(pattern), self.num_entity, dtype=torch.bool, device=self.device)
-        t_mask[pos_index, t_truth_index] = 0
+        num_entities = self.num_entity  # total number of entities
+        edge_index = self.fact_graph.edge_index.to(device)  # shape [2, num_edges]
+        edge_type = self.fact_graph.edge_type.to(device)    # shape [num_edges]
+
+        h_all = edge_index[0]
+        t_all = edge_index[1]
+
+        #########################################
+        # 1. Candidate tails
+        #########################################
+        mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
+                (edge_type.unsqueeze(1) == pos_r_index.unsqueeze(0))
+        matched_edges_t = mask_t.nonzero(as_tuple=False)
+        t_truth_index = t_all[matched_edges_t[:, 0]]
+
+        t_mask = torch.ones(batch_size, num_entities, dtype=torch.bool, device=device)
+        t_mask[torch.arange(batch_size, device=device).repeat_interleave(mask_t.sum(dim=0)), t_truth_index] = 0
+
         neg_t_candidate = t_mask.nonzero()[:, 1]
         num_t_candidate = t_mask.sum(dim=-1)
         neg_t_index = functional.variadic_sample(neg_t_candidate, num_t_candidate, self.num_negative)
 
-        pattern = torch.stack([any, pos_t_index, pos_r_index], dim=-1)
-        # pattern = pattern[batch_size // 2:]
-        edge_index, num_h_truth = self.fact_graph.match(pattern)
-        h_truth_index = self.fact_graph.edge_list[edge_index, 0]
-        pos_index = torch.repeat_interleave(num_h_truth)
-        h_mask = torch.ones(len(pattern), self.num_entity, dtype=torch.bool, device=self.device)
-        h_mask[pos_index, h_truth_index] = 0
+        #########################################
+        # 2. Candidate heads
+        #########################################
+        mask_h = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
+                (edge_type.unsqueeze(1) == pos_r_index.unsqueeze(0))
+        matched_edges_h = mask_h.nonzero(as_tuple=False)
+        h_truth_index = h_all[matched_edges_h[:, 0]]
+
+        h_mask = torch.ones(batch_size, num_entities, dtype=torch.bool, device=device)
+        h_mask[torch.arange(batch_size, device=device).repeat_interleave(mask_h.sum(dim=0)), h_truth_index] = 0
+
         neg_h_candidate = h_mask.nonzero()[:, 1]
         num_h_candidate = h_mask.sum(dim=-1)
         neg_h_index = functional.variadic_sample(neg_h_candidate, num_h_candidate, self.num_negative)
 
+        #########################################
+        # 3. Combine
+        #########################################
         neg_index = torch.cat([neg_t_index, neg_h_index])
+        return neg_index
 
-        return neg_index    
 
 
 class KGL4IndKGC(KGL4KGC):
