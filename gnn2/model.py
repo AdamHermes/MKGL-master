@@ -60,46 +60,43 @@ def neighbors(edge_index, nodes):
 #############################################
 
 
+import torch
+from torch import nn
+from torch_geometric.nn import PNAConv
+from torch_geometric.utils import degree
+
 class PNA(nn.Module):
-    def __init__(self, in_dim, out_dim, num_relations, num_layers=3):
+    def __init__(self, in_dim, out_dim, num_relations, edge_index, num_layers=3):
         super().__init__()
         aggr = ['mean', 'max', 'min', 'std']
         scalers = ['identity', 'amplification', 'attenuation']
 
         self.num_relations = num_relations
-        self.layers = nn.ModuleList()
         self.short_cut = True
+        self.layers = nn.ModuleList()
 
-        # We will set deg=None here, and update it dynamically during forward
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        self.num_layers = num_layers
-        self.aggr = aggr
-        self.scalers = scalers
-        self.convs = nn.ModuleList()
+        # Compute degrees once from edge_index
+        num_nodes = edge_index.max().item() + 1
+        deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
+
         for _ in range(num_layers):
-            self.convs.append(
+            self.layers.append(
                 PNAConv(
                     in_dim,
                     out_dim,
                     aggregators=aggr,
                     scalers=scalers,
-                    deg=None  # will pass deg dynamically in forward
+                    deg=deg
                 )
             )
 
     def forward(self, x, edge_index):
-        # Compute degree histogram dynamically from edge_index
-        num_nodes = x.size(0)
-        deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
-
         h = x
-        for conv in self.convs:
-            # Pass deg to PNAConv
-            new = conv(h, edge_index, deg=deg)
+        for conv in self.layers:
+            h_new = conv(h, edge_index)
             if self.short_cut:
-                new += h
-            h = new
+                h_new += h
+            h = h_new
         return h
 
 
