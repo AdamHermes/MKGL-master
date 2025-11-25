@@ -127,7 +127,7 @@ class ScoreRetriever(BasePNARetriever):
         score_text_embs = super().forward(all_kgl_index)
         head_embeds = self.h_down_scaling(hidden_states) 
         rel_embeds = self.r_down_scaling(rel_hidden_states) 
-        score = self.kg_retriever(h_id, r_id, t_id, head_embeds, rel_embeds, graph, score_text_embs, all_index)
+        score = self.kg_retriever(h_id, r_id, t_id, head_embeds, rel_embeds, graph.edge_index, score_text_embs, all_index)
         
         return score
 
