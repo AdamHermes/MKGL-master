@@ -306,16 +306,21 @@ class ConditionedPNA(nn.Module):
 
             num_nodes = hidden.size(0)
 
-            # 2) Compute degrees safely
+            # Ensure e_sub is a proper tensor
             if e_sub.numel() == 0:
-                deg_nodes = torch.ones(num_nodes, device=device)  # fallback
+                # No edges selected, use default degree=1
+                deg_nodes = torch.ones(num_nodes, device=device, dtype=torch.float32)
             else:
-                # ensure e_sub shape is (2, E)
-                if isinstance(e_sub, (tuple, list)):
-                    e_sub = torch.stack(e_sub, dim=0)  # shape (2, E)
-                src_nodes = e_sub[0]
-                deg_nodes = degree(src_nodes, num_nodes=num_nodes)
-                deg_nodes = deg_nodes + 1e-6  # avoid division by zero
+                # Make sure e_sub is contiguous and 2D (2, E)
+                e_sub = e_sub.contiguous()
+                if e_sub.dim() != 2 or e_sub.size(0) != 2:
+                    raise ValueError(f"e_sub has wrong shape: {e_sub.shape}")
+
+                # Compute degree using the source nodes
+                src_nodes = e_sub[0]  # 1D tensor of source node indices
+                deg_nodes = degree(src_nodes, num_nodes=num_nodes, dtype=torch.float32)
+                deg_nodes = deg_nodes + 1e-6  # small epsilon to avoid div/0
+
 
             # 3) PNA update
             new_hidden = layer(hidden, e_sub, deg=deg_nodes)
