@@ -308,13 +308,13 @@ class ConditionedPNA(nn.Module):
 
             # 2) Compute degrees safely
             if e_sub.numel() == 0:
-                deg_nodes = torch.ones(num_nodes, device=device, dtype=torch.float32)  # fallback
+                deg_nodes = torch.ones(num_nodes, device=device)  # fallback
             else:
                 # ensure e_sub shape is (2, E)
                 if isinstance(e_sub, (tuple, list)):
                     e_sub = torch.stack(e_sub, dim=0)  # shape (2, E)
                 src_nodes = e_sub[0]
-                deg_nodes = degree(src_nodes, num_nodes=num_nodes, dtype=torch.float32)
+                deg_nodes = degree(src_nodes, num_nodes=num_nodes)
                 deg_nodes = deg_nodes + 1e-6  # avoid division by zero
 
             # 3) PNA update
