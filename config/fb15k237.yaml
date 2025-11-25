@@ -35,7 +35,7 @@ trainer:
   output_dir: *output_dir
   num_train_epochs: 5
   save_total_limit: 1
-  per_device_train_batch_size: 16
+  per_device_train_batch_size: 2
   per_device_eval_batch_size: 16
   eval_strategy: epoch
   eval_steps: 500
@@ -85,6 +85,6 @@ score_retriever:
     out_dim: *r               # output embedding dimension
     num_relations: 472        # number of relations in FB15k-237
     hidden_dim: 256           # hidden dim inside ConditionedPNA MLP (optional)
-    num_layers: 6             # corresponds to TorchDrug num_layer
+    num_layers: 2             # corresponds to TorchDrug num_layer
     remove_one_hop: yes       # keep same
     node_ratio: 0.1           # same as TorchDrug
