@@ -6,6 +6,7 @@ from torch_scatter import scatter_add
 from torch_geometric.nn import PNAConv
 from torch_geometric.utils import to_undirected, subgraph
 from torch_geometric.utils import degree
+from torch_geometric.utils import degree as pyg_degree
 
 #############################################
 # Helper Functions (TorchDrug → PyG)
@@ -54,6 +55,54 @@ def neighbors(edge_index, nodes):
     out_edges = torch.nonzero(mask).squeeze(-1)
     out_nodes = col[mask]
     return out_edges, out_nodes
+
+
+
+def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0):
+    """
+    Per-graph selection of edges:
+      - For each graph instance b in the batch, pick top-k nodes by 'score' (k = node_ratio * num_nodes_b)
+      - Gather outgoing edges of those nodes (edge_index refers to the full repeated graph)
+      - From those candidate edges, choose top-e edges by node scores of their target nodes (e = degree_ratio * number_of_candidate_edges)
+    Returns: concatenated selected edge indices (1D long tensor, indices into the columns of `edge_index`)
+    """
+    device = edge_index.device
+    unique_batches = torch.unique(batch)
+    selected = []
+
+    for b in unique_batches:
+        mask_nodes = (batch == b)
+        node_ids = torch.nonzero(mask_nodes, as_tuple=True)[0]  # indices of nodes in rep graph
+        if node_ids.numel() == 0:
+            continue
+
+        scores_b = score[node_ids]  # per-node scores for this graph
+        k = max(1, int(node_ratio * node_ids.numel()))
+        if scores_b.numel() <= k:
+            top_node_idx = torch.arange(scores_b.numel(), device=device)
+        else:
+            _, top_node_idx = torch.topk(scores_b, k)
+
+        selected_nodes = node_ids[top_node_idx]  # actual node ids in rep graph
+
+        # neighbors: edges where row (src) in selected_nodes
+        edge_idxs, cols = neighbors(edge_index, selected_nodes)
+        if edge_idxs.numel() == 0:
+            continue
+
+        e = max(1, int(len(edge_idxs) * degree_ratio))
+        # choose top edges by score of their target nodes (cols gives targets)
+        target_scores = score[cols]
+        if target_scores.numel() <= e:
+            top_e_idx = torch.arange(target_scores.numel(), device=device)
+        else:
+            _, top_e_idx = torch.topk(target_scores, e)
+
+        selected.append(edge_idxs[top_e_idx])
+
+    if len(selected) == 0:
+        return torch.empty(0, dtype=torch.long, device=device)
+    return torch.cat(selected)
 
 
 #############################################
@@ -216,6 +265,73 @@ class ConditionedPNA(nn.Module):
 
         return torch.cat(selected_edges)
 
+    def aggregate_pyg(self, x_rep, e_rep, batch_rep, h_index_rep, r_index_rep, input_embeds, rel_embeds, init_score):
+        """
+        PyG-style aggregate for ConditionedPNA.
+        Args:
+        - self: ConditionedPNA instance (uses self.layers, self.score, self.node_ratio, self.degree_ratio)
+        - x_rep: repeated node features (B*N, dim)  -- not strictly needed here because input_embeds already shaped
+        - e_rep: repeated edge_index (2, B*E)
+        - batch_rep: (B*N,) node->graph mapping
+        - h_index_rep: (batch_size,) head indices in rep graph (first head per sample)
+        - r_index_rep: (batch_size,) relation ids (one per sample)
+        - input_embeds: initial per-node embeddings (B*N, dim) (this should initialize tails/head placement already)
+        - rel_embeds: (batch_size, rel_dim)
+        - init_score: initial per-node scores (B*N,) or something compatible
+        Returns:
+        - per-node score tensor (B*N,)
+        """
+        device = x_rep.device
+        num_nodes_rep = x_rep.size(0)
+
+        # boundary and score equivalent
+        boundary = input_embeds.clone()
+        score = init_score.clone()
+        hidden = boundary.clone()
+
+        # The rel embedding per-node (index by batch)
+        rel_per_node = rel_embeds[batch_rep]  # shape (B*N, rel_dim)
+
+        # compute pna_degree_mean if needed (approx)
+        # use out-degree on e_rep
+        deg_out_rep = torch.zeros(num_nodes_rep, device=device, dtype=torch.long)
+        if e_rep.size(1) > 0:
+            src = e_rep[0]
+            deg_out_rep = torch.bincount(src, minlength=num_nodes_rep).to(device)
+
+        # iterate layers
+        for layer in self.layers:
+            # 1) select edges indices (columns in e_rep)
+            sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
+            if sel_edge_idx.numel() == 0:
+                # nothing selected: break or continue with full graph — here we continue but with full graph update
+                e_sub = e_rep
+            else:
+                e_sub = e_rep[:, sel_edge_idx]  # subgraph edge_index
+
+            # 2) perform GNN update on subgraph edges
+            # layer expects (x, edge_index) and returns new node features (B*N, dim)
+            new_hidden = layer(hidden, e_sub)  # shape (B*N, dim)
+
+            # 3) update only nodes that have outgoing edges in subgraph
+            if e_sub.size(1) > 0:
+                out_deg_sub = torch.zeros(num_nodes_rep, device=device, dtype=torch.long)
+                out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device, dtype=torch.long))
+                out_mask = out_deg_sub > 0
+                node_out = torch.nonzero(out_mask, as_tuple=True)[0]
+                # add new features to those node indices
+                hidden[node_out] = (hidden[node_out] + new_hidden[node_out]).type(hidden.dtype)
+            else:
+                # if no edges selected, (option) use the full new_hidden update
+                hidden = hidden + new_hidden
+
+            # 4) recompute score for all nodes using rel_per_node
+            # self.score expects (hidden_nodes, rel_for_those_nodes)
+            # and outputs a scalar per node
+            # rel_for_node = rel_per_node (already matched shape)
+            score = self.score(hidden, rel_per_node).type(score.dtype)
+
+        return score
 
     ###########################################
     # main forward
@@ -303,8 +419,21 @@ class ConditionedPNA(nn.Module):
             rep_graph.degree_out = None
 
         # 9) call aggregate (your aggregate signature in the PyG rewrite earlier was aggregate(graph, h_index, r_index, input_embeds, rel_embeds, init_score))
-        score = self.aggregate(rep_graph, h_index[:, 0], r_index[:, 0], input_embeds, rel_embeds, init_score)
+        # previously:
+        # input_embeds, init_score = self.init_input_embeds(...)
+        # score = self.aggregate(graph, ...)
+
+        # with PyG tensors:
+        score = self.aggregate_pyg(self,
+                            x_rep=x_rep,
+                            e_rep=e_rep,
+                            batch_rep=batch_rep,
+                            h_index_rep=h_index[:, 0],   # already shifted indexes into rep graph
+                            r_index_rep=r_index[:, 0],
+                            input_embeds=input_embeds,
+                            rel_embeds=rel_embeds,       # shape (batch_size, dim)
+                            init_score=init_score)
+        final = score[t_index]   # t_index already shifted earlier
 
         # 10) final indexing to get scores for requested tails (t_index already shifted to repeated index)
-        final = score[t_index]   # shape: (batch_size, k) presumably
         return final
