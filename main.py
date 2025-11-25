@@ -66,7 +66,7 @@ if __name__ == "__main__":
     cfg.score_retriever.kg_encoder.base_layer.num_relation = int(
         dataset.kgdata.num_relation)
     
-    torch.nn.Module = torch.nn._Module
+    #torch.nn.Module = torch.nn._Module
     config = MKGLConfig.from_pretrained(**cfg.mkglconfig)
     model = MKGL.from_pretrained(
         **cfg.mkgl, device_map={"": Accelerator().process_index}, config=config)
