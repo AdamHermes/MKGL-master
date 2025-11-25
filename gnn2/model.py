@@ -39,11 +39,6 @@ def repeat_graph(x: torch.Tensor, edge_index: torch.Tensor, batch_size: int):
     return x_rep, edge_index_rep, node_batch
 
 
-def degree(edge_index, num_nodes):
-    row, col = edge_index
-    deg = torch.zeros(num_nodes, device=row.device)
-    deg.scatter_add_(0, row, torch.ones_like(row, dtype=torch.float))
-    return deg
 
 def neighbors(edge_index, nodes):
     """
