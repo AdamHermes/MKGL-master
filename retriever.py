@@ -20,9 +20,15 @@ class BasePNARetriever(nn.Module):
         self.kgl2token = kgl2token
         self.orig_vocab_size = orig_vocab_size
         
+        #.down_scaling = nn.Linear(
+        #        self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
         self.down_scaling = nn.Linear(
-                self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
-        
+            text_embeddings.shape[1],  # use actual embedding dim instead of what in the config(2048)
+            self.config.r, 
+            bias=False, 
+            dtype=torch.float
+        )
+
         if self.config.text_encoder == 'pna':
             self.re_scaling = nn.Linear(config.r*12, self.config.r)
     
