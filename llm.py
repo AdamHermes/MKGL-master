@@ -242,8 +242,9 @@ class KGL4KGC(nn.Module):
                                                        self.num_negative + 1)
             r_index = pos_r_index.unsqueeze(-1).repeat(2,
                                                        self.num_negative + 1)
-            t_index[:batch_size, 1:] = neg_t_index[:batch_size]
-            h_index[batch_size:, 1:] = neg_h_index[batch_size:]
+            t_index[:, 1:] = neg_t_index
+            h_index[:, 1:] = neg_h_index
+
             
             h_id, r_id, t_id = h_index, r_index, t_index
         else:
