@@ -39,25 +39,34 @@ from torch_geometric.nn import PNAConv
 from torch_geometric.utils import degree
 
 
-def repeat_graph(edge_index, num_nodes, batch_size):
-    E = edge_index.size(1)
+def repeat_graph(edge_index, num_nodes, batch_size, device=None):
+    """
+    Repeat a single graph 'batch_size' times.
 
-    # device sync is critical
-    device = edge_index.device
+    Args:
+        edge_index: (2, E) tensor of the graph
+        num_nodes: number of nodes in the original graph
+        batch_size: how many copies to repeat
+        device: torch device
 
-    # Repeat edges
-    edge_index_rep = edge_index.repeat(1, batch_size)
+    Returns:
+        edge_index_rep: (2, E*batch_size)
+        offsets_graph: (batch_size,) offsets per graph
+    """
+    if device is None:
+        device = edge_index.device
 
-    # Offsets for each copy
-    offsets = (torch.arange(batch_size, device=device) * num_nodes)
+    # offset per graph
+    offsets_graph = torch.arange(batch_size, device=device) * num_nodes  # shape: (batch_size,)
 
-    # Expand offsets to match edge index shape
-    offsets = offsets.repeat_interleave(E)
+    # repeat edges
+    e_rep = edge_index.repeat(1, batch_size)                            # (2, E*batch_size)
+    edge_offsets = offsets_graph.repeat_interleave(edge_index.size(1))  # (batch_size*E,)
+    e_rep = e_rep + edge_offsets.unsqueeze(0)
 
-    # Add offsets to node indices
-    edge_index_rep = edge_index_rep + offsets.unsqueeze(0)
+    return e_rep, offsets_graph
 
-    return edge_index_rep, offsets
+
 
 
 
@@ -286,16 +295,17 @@ class ConditionedPNA(nn.Module):
         num_nodes = hidden_states.size(0)
 
         # repeat graph
-        e_rep, offsets = repeat_graph(edge_index, num_nodes, batch_size)
+# repeat the graph
+        e_rep, offsets_graph = repeat_graph(edge_index, num_nodes, batch_size)
 
-        # repeat node features and build batch mapping
+        # shift head/tail indices
+        h_index_rep = h_index + offsets_graph.unsqueeze(-1)
+        t_index_rep = t_index + offsets_graph.unsqueeze(-1)
+
+        # repeat node features and batch mapping
         x_rep = hidden_states.repeat(batch_size, 1)
-        batch_rep = torch.arange(batch_size, device=h_index.device).unsqueeze(1).repeat(1, num_nodes).view(-1)
+        batch_rep = torch.arange(batch_size, device=edge_index.device).unsqueeze(1).repeat(1, num_nodes).view(-1)
 
-        # shift head/tail indices into repeated frame
-        offset_per_sample = offsets.to(h_index.device)
-        h_index_rep = h_index + offset_per_sample.unsqueeze(-1)
-        t_index_rep = t_index + offset_per_sample.unsqueeze(-1)
 
         # For simplicity we only use the first head/relation per sample (TorchDrug asserts that)
         assert (h_index_rep[:, [0]] == h_index_rep).all()
