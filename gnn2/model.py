@@ -107,13 +107,14 @@ def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0)
 
 
 class PNA(nn.Module):
-    def __init__(self, in_dim, out_dim, num_relations, num_layers=3):
+    def __init__(self, in_dim, out_dim, num_relations, num_layers=3, avg_deg=10.0):
         super().__init__()
         aggr = ['mean', 'max', 'min', 'std']
         scalers = ['identity', 'amplification', 'attenuation']
 
         self.layers = nn.ModuleList()
-        deg_placeholder = torch.ones(1)  # temp placeholder
+        #deg_placeholder = torch.ones(1)  # temp placeholder
+        deg_hist = torch.tensor([1] * 10 + [int(avg_deg)*2] * 10, dtype=torch.float)
         for _ in range(num_layers):
             self.layers.append(
                 PNAConv(
@@ -121,12 +122,13 @@ class PNA(nn.Module):
                     out_dim,
                     aggregators=aggr,
                     scalers=scalers,
-                    deg=deg_placeholder
+                    deg=deg_hist,
                 )
             )
         self.short_cut = True
 
     def forward(self, x, edge_index):
+        x = x.to(torch.float32)
         num_nodes = x.size(0)
 
         # Compute degrees dynamically
@@ -178,14 +180,13 @@ class ConditionedPNA(PNA):
         num_relations,
         num_layers=3,
         node_ratio=0.1,
-        degree_ratio=1.0
+        degree_ratio=1.0,
     ):
-        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers)
+        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers, avg_deg=10.0)
 
         self.node_ratio = node_ratio
         self.degree_ratio = degree_ratio
         self.num_relations = num_relations
-
         # backbone GNN
 
         self.rel_embedding = nn.Embedding(num_relations * 2, in_dim)
@@ -225,12 +226,12 @@ class ConditionedPNA(PNA):
     def init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch):
         x = torch.zeros_like(x)
         #x = x.to(torch.bfloat16)
-        x[t_idx] = t_emb
-        x[h_idx] = h_emb
+        x[t_idx] = t_emb.to(x.dtype)
+        x[h_idx] = h_emb.to(x.dtype)
 
         # score = 0 for all nodes, except head
         score = torch.zeros(batch.size(0), device=x.device)
-        score = score.to(torch.bfloat16)
+        score = score.to(dtype=torch.float32)
         score[h_idx] = self.score(h_emb, rel_emb)
         score = score.repeat_interleave((batch == batch.unique()[0]).sum())
 
@@ -301,6 +302,10 @@ class ConditionedPNA(PNA):
         device = x_rep.device
         num_nodes_rep = x_rep.size(0)
 
+        input_embeds = input_embeds.float()
+        init_score = init_score.float()
+        rel_embeds = rel_embeds.float()
+
         # boundary and score equivalent
         boundary = input_embeds.clone()
         score = init_score.clone()
@@ -320,18 +325,22 @@ class ConditionedPNA(PNA):
         for i, layer in enumerate(self.layers):
             # 1) Select edges
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
-            e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
+            
+            # Xử lý trường hợp không chọn được cạnh nào (Edge case)
+            if sel_edge_idx.numel() == 0:
+                 score = self.score(hidden, rel_per_node).type(score.dtype)
+                 continue
+            
+            e_sub = e_rep[:, sel_edge_idx]
 
-
-            # Ensure e_sub is a proper tensor
-                # No edges selected, use default degree=1
-                # Make sure e_sub is contiguous and 2D (2, E)
-                # Compute degree using the source nodes
+            # 2) Gating input (QUAN TRỌNG: Đã sửa lỗi dùng sai biến)
+            gate = torch.sigmoid(score).unsqueeze(-1)
+            layer_input = gate * hidden  # Input đã được điều tiết bởi score
 
             # 3) PNA update
             print("input_embeds min/max/nan:", torch.isnan(e_sub).any())
 
-            new_hidden = layer(hidden, e_sub)
+            new_hidden = layer(layer_input, e_sub)
 
             # Debug
             print(f"Layer {i}: new_hidden min/max/nan: {new_hidden.min().item()}, {new_hidden.max().item()}, {torch.isnan(new_hidden).any()}")
@@ -348,8 +357,6 @@ class ConditionedPNA(PNA):
             # 5) Recompute score
             score = self.score(hidden, rel_per_node).type(score.dtype)
             print(f"Layer {i}: score min/max/nan: {score.min().item()}, {score.max().item()}, {torch.isnan(score).any()}")
-
-
 
         return score
 
@@ -469,3 +476,4 @@ class ConditionedPNA(PNA):
 
         # 10) final indexing to get scores for requested tails (t_index already shifted to repeated index)
         return final
+    
