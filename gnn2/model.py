@@ -230,9 +230,17 @@ class ConditionedPNA(nn.Module):
         # here assume score is already for the repeated graph
         return out, score
 
-    def aggregate(self, x_rep: torch.Tensor, e_rep: torch.LongTensor, batch_rep: torch.LongTensor,
-                  h_index_rep: torch.LongTensor, r_index_rep: torch.LongTensor,
-                  input_embeds: torch.Tensor, rel_embeds: torch.Tensor, init_score: torch.Tensor):
+    def aggregate(
+        self,
+        x_rep: torch.Tensor,
+        e_rep: torch.LongTensor,
+        batch_rep: torch.LongTensor,
+        h_index_rep: torch.LongTensor,
+        r_index_rep: torch.LongTensor,
+        input_embeds: torch.Tensor,
+        rel_embeds: torch.Tensor,
+        init_score: torch.Tensor
+    ):
         device = x_rep.device
         num_nodes_rep = x_rep.size(0)
 
@@ -240,6 +248,7 @@ class ConditionedPNA(nn.Module):
         score = init_score.clone()
         hidden = boundary.clone()
 
+        # Repeat relation embeddings per node
         rel_per_node = rel_embeds[batch_rep]
 
         # precompute degree out
@@ -248,122 +257,98 @@ class ConditionedPNA(nn.Module):
             src = e_rep[0]
             deg_out_rep = torch.bincount(src, minlength=num_nodes_rep).to(device)
 
-        # iterate layers
         for i, layer in enumerate(self.gnn.layers):
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
             e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
 
-            # make sure e_sub shape is (2, Esub)
             if e_sub.numel() == 0:
-                # no edges selected: use zero update (but still run conv with deg=1)
-                deg_sub = torch.ones(num_nodes_rep, device=device)
                 new_hidden = torch.zeros_like(hidden)
             else:
-                # compute degree for subgraph
                 deg_sub = degree(e_sub[0], num_nodes=num_nodes_rep, dtype=hidden.dtype).to(device)
                 deg_sub = deg_sub.clamp(min=1.0)
-                # PNAConv expects float degree
                 new_hidden = layer(hidden, e_sub, deg=deg_sub)
 
-            # accumulate
+            # Accumulate only for nodes with outgoing edges
             if e_sub.numel() > 0 and e_sub.size(1) > 0:
                 out_deg_sub = torch.zeros(num_nodes_rep, device=device, dtype=torch.float32)
-                out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device, dtype=torch.float32))
+                out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device))
                 node_out = torch.nonzero(out_deg_sub > 0, as_tuple=True)[0]
                 hidden[node_out] = hidden[node_out] + new_hidden[node_out]
             else:
                 hidden = hidden + new_hidden
 
-            # recompute score
             score = self.score(hidden, rel_per_node).type(score.dtype)
 
         return score
 
-    def forward(self, h_index: torch.LongTensor, r_index: torch.LongTensor, t_index: torch.LongTensor,
-                hidden_states: torch.Tensor, rel_hidden_states: Optional[torch.Tensor],
-                edge_index: torch.LongTensor,
-                score_text_embs: Optional[torch.Tensor], all_index: Optional[torch.Tensor]):
-        """Public API similar to TorchDrug's ConditionedPNA.forward
 
-        Inputs are given relative to the original graph (not repeated). This
-        function will repeat the graph for batch processing internally.
-        """
-        # negative sampling swapping
+    def forward(
+        self,
+        h_index: torch.LongTensor,
+        r_index: torch.LongTensor,
+        t_index: torch.LongTensor,
+        hidden_states: torch.Tensor,
+        rel_hidden_states: Optional[torch.Tensor],
+        edge_index: torch.LongTensor,
+        score_text_embs: Optional[torch.Tensor],
+        all_index: Optional[torch.Tensor]
+    ):
+        # Negative sampling
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
-
         batch_size = h_index.size(0)
         num_nodes = hidden_states.size(0)
 
-        # repeat graph
-# repeat the graph
+        # Repeat graph for batch processing
         e_rep, offsets_graph = repeat_graph(edge_index, num_nodes, batch_size)
+        device = hidden_states.device
 
-        # shift head/tail indices
-        h_index_rep = h_index + offsets_graph.unsqueeze(-1)
-        t_index_rep = t_index + offsets_graph.unsqueeze(-1)
+        # Shift head/tail indices into repeated graph
+        h_index_rep = h_index + offsets_graph.unsqueeze(-1).to(h_index.device)
+        t_index_rep = t_index + offsets_graph.unsqueeze(-1).to(t_index.device)
 
-        # repeat node features and batch mapping
+        # Repeat node features and batch mapping
         x_rep = hidden_states.repeat(batch_size, 1)
-        batch_rep = torch.arange(batch_size, device=edge_index.device).unsqueeze(1).repeat(1, num_nodes).view(-1)
+        batch_rep = torch.arange(batch_size, device=device).unsqueeze(1).repeat(1, num_nodes).view(-1)
 
-
-        # For simplicity we only use the first head/relation per sample (TorchDrug asserts that)
-        assert (h_index_rep[:, [0]] == h_index_rep).all()
-        assert (r_index[:, [0]] == r_index).all()
-
+        # Relation embeddings
         rel_embeds = self.rel_embedding(r_index[:, 0]).type(hidden_states.dtype)
 
-        # create per-node input embeddings for rep graph
-        # gather per-node head embeddings and tail embeddings
-        # h_emb: shape (B * num_nodes, dim) - but we usually want h_emb only at head positions
+        # Create per-node embeddings
         h_emb = torch.zeros_like(x_rep)
         t_emb = torch.zeros_like(x_rep)
 
-        # place head and tail embeddings at appropriate indices
-        # here we take embeddings from hidden_states (original graph) for those indices
-        # then repeat accordingly
-        # get original head embeddings and tail embeddings
-        orig_h_emb = hidden_states[h_index[:, 0]]  # (B, dim)
+        orig_h_emb = hidden_states[h_index[:, 0]]
         orig_t_emb = hidden_states[t_index[:, 0]]
-        # expand to rep positions
-        h_emb = torch.zeros_like(x_rep)
-        t_emb = torch.zeros_like(x_rep)
 
-        # compute flat indices
-        # compute flat indices
         flat_h_idx = h_index_rep[:, 0].view(-1)
         flat_t_idx = t_index_rep[:, 0].view(-1)
 
-        # repeat embeddings safely
-        print("=== Debug h_emb assignment ===")
-        print("h_emb shape:", h_emb.shape, "device:", h_emb.device)
-        print("flat_h_idx shape:", flat_h_idx.shape, "device:", flat_h_idx.device)
-        print("orig_h_emb shape:", orig_h_emb.shape, "device:", orig_h_emb.device)
-        print("flat_h_idx max:", flat_h_idx.max().item(), "h_emb size(0):", h_emb.size(0))
+        # Safe assignment without repeating too much
         repeat_count_h = (flat_h_idx.size(0) // orig_h_emb.size(0)) + 1
         repeat_count_t = (flat_t_idx.size(0) // orig_t_emb.size(0)) + 1
-
         expanded_h_emb = orig_h_emb.repeat_interleave(repeat_count_h, dim=0)[:flat_h_idx.size(0)]
         expanded_t_emb = orig_t_emb.repeat_interleave(repeat_count_t, dim=0)[:flat_t_idx.size(0)]
-        
-        print("expanded_h_emb shape:", expanded_h_emb.shape)
 
-        # assign to repeated embeddings
         h_emb[flat_h_idx] = expanded_h_emb
         t_emb[flat_t_idx] = expanded_t_emb
 
+        # Initialize input embeddings and initial score
+        input_embeds, init_score = self.init_input_embeds(
+            x_rep, h_emb, flat_h_idx, t_emb, flat_t_idx,
+            rel_embeds.repeat_interleave(num_nodes), batch_rep
+        )
 
-        # init input embeds and initial score
-        input_embeds, init_score = self.init_input_embeds(x_rep, h_emb, flat_h_idx, t_emb, flat_t_idx, rel_embeds.repeat_interleave(num_nodes), batch_rep)
+        # Aggregate
+        score_rep = self.aggregate(
+            x_rep, e_rep, batch_rep,
+            h_index_rep[:, 0].view(-1), r_index[:, 0].view(-1),
+            input_embeds, rel_embeds.repeat_interleave(num_nodes), init_score
+        )
 
-        # call aggregate
-        score_rep = self.aggregate(x_rep, e_rep, batch_rep, h_index_rep[:, 0].view(-1), r_index[:, 0].view(-1), input_embeds, rel_embeds.repeat_interleave(num_nodes), init_score)
-
-        # collect scores for tails
-        # score_rep is per-node in repeated graph; pick tail positions
-        out_score = score_rep[flat_t_idx]
-        out_score = out_score.view(batch_size, -1)
+        # Collect tail scores
+        out_score = score_rep[flat_t_idx].view(batch_size, -1)
         return out_score
+
 
 
 # End of file
