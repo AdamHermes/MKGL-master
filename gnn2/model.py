@@ -270,7 +270,7 @@ class ConditionedPNA(nn.Module):
 
     def forward(self, h_index: torch.LongTensor, r_index: torch.LongTensor, t_index: torch.LongTensor,
                 hidden_states: torch.Tensor, rel_hidden_states: Optional[torch.Tensor],
-                edge_index: torch.LongTensor, batch: Optional[torch.LongTensor],
+                edge_index: torch.LongTensor,
                 score_text_embs: Optional[torch.Tensor], all_index: Optional[torch.Tensor]):
         """Public API similar to TorchDrug's ConditionedPNA.forward
 
