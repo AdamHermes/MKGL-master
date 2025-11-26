@@ -170,7 +170,7 @@ class PNA(nn.Module):
 # PyG ConditionedPNA (Faithful Rewrite)
 #############################################
 
-class ConditionedPNA(nn.Module):
+class ConditionedPNA(PNA):
     def __init__(
         self,
         in_dim,
