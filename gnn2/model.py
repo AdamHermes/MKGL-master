@@ -108,7 +108,7 @@ def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0)
 
 class PNA(nn.Module):
     def __init__(self, in_dim, out_dim, num_relations, num_layers=3):
-        super().__init__()
+        super(PNA).__init__()
         aggr = ['mean', 'max', 'min', 'std']
         scalers = ['identity', 'amplification', 'attenuation']
 
@@ -180,7 +180,7 @@ class ConditionedPNA(PNA):
         node_ratio=0.1,
         degree_ratio=1.0
     ):
-        super().__init__()
+        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers)
 
         self.node_ratio = node_ratio
         self.degree_ratio = degree_ratio
