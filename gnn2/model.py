@@ -187,7 +187,6 @@ class ConditionedPNA(nn.Module):
         self.num_relations = num_relations
 
         # backbone GNN
-        self.gnn = PNA(in_dim, out_dim, num_relations, num_layers)
 
         self.rel_embedding = nn.Embedding(num_relations * 2, in_dim)
 
@@ -318,7 +317,7 @@ class ConditionedPNA(nn.Module):
             deg_out_rep = torch.bincount(src, minlength=num_nodes_rep).to(device)
 
         # iterate layers
-        for i, layer in enumerate(self.gnn.layers):
+        for i, layer in enumerate(self.layers):
             # 1) Select edges
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
             e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
