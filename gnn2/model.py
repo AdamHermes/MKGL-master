@@ -11,8 +11,6 @@ from torch_geometric.utils import degree
 # Helper Functions (TorchDrug → PyG)
 #############################################
 
-
-
 def repeat_graph(x: torch.Tensor, edge_index: torch.Tensor, batch_size: int):
     """
     Repeat node features x (N, D) and edge_index (2, E) batch_size times.
@@ -38,8 +36,6 @@ def repeat_graph(x: torch.Tensor, edge_index: torch.Tensor, batch_size: int):
 
     return x_rep, edge_index_rep, node_batch
 
-
-
 def neighbors(edge_index, nodes):
     """
     Returns (edge_idx, neighbor_nodes)
@@ -49,8 +45,6 @@ def neighbors(edge_index, nodes):
     out_edges = torch.nonzero(mask).squeeze(-1)
     out_nodes = col[mask]
     return out_edges, out_nodes
-
-
 
 def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0):
     """
@@ -98,22 +92,17 @@ def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0)
         return torch.empty(0, dtype=torch.long, device=device)
     return torch.cat(selected)
 
-
 #############################################
 # PyG PNA (simple backbone)
 #############################################
 
-
-
-
 class PNA(nn.Module):
-    def __init__(self, in_dim, out_dim, num_relations, num_layers=3, avg_deg=3.0):
+    def __init__(self, in_dim, out_dim, num_relations, num_layers=3, avg_deg=1.0):
         super().__init__()
         aggr = ['mean', 'max', 'min', 'std']
         scalers = ['identity', 'amplification', 'attenuation']
 
         self.layers = nn.ModuleList()
-        #deg_placeholder = torch.ones(1)  # temp placeholder
         deg_hist = torch.tensor([1] * 10 + [int(avg_deg)*2] * 10, dtype=torch.float)
         for _ in range(num_layers):
             self.layers.append(
@@ -163,12 +152,8 @@ class PNA(nn.Module):
             h = h_new
 
         return h
-
-
-
-
+    
 #############################################
-
 # PyG ConditionedPNA (Faithful Rewrite)
 #############################################
 
@@ -182,7 +167,7 @@ class ConditionedPNA(PNA):
         node_ratio=0.1,
         degree_ratio=1.0,
     ):
-        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers, avg_deg=3.0)
+        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers, avg_deg=1.0)
 
         self.node_ratio = node_ratio
         self.degree_ratio = degree_ratio
@@ -211,7 +196,6 @@ class ConditionedPNA(PNA):
         x = heur * hidden
         return self.mlp(x).squeeze(-1)
 
-
     ###########################################
     # negative sample swapping
     ###########################################
@@ -226,13 +210,18 @@ class ConditionedPNA(PNA):
     # init input embeddings
     ###########################################
     def init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch):
-        # Tạo x với dtype mặc định (thường là float32 nếu bạn đã ép x_rep ở ngoài)
-        x = torch.zeros_like(x)
+        # Tạo x với dtype mặc định
+        x = x.clone()
         # Đảm bảo t_emb và h_emb cùng kiểu với x trước khi gán
         x[t_idx] = t_emb.to(x.dtype)
         x[h_idx] = h_emb.to(x.dtype)
-        # Tạo score là Float32 (Đúng, giữ nguyên)
-        score = torch.zeros(batch.size(0), device=x.device, dtype=torch.float32)
+        # Tính score "nền" (background) dựa trên relation embedding và vector 0
+        dummy_hidden = torch.zeros_like(rel_emb)
+        background_score = self.score(dummy_hidden, rel_emb)
+        # Mở rộng background score cho từng node dựa trên batch index
+        score = background_score[batch]
+        score = score.to(torch.float32)
+        # score = torch.zeros(batch.size(0), device=x.device, dtype=torch.float32)
         calculated_score = self.score(h_emb, rel_emb)
         score[h_idx] = calculated_score.to(dtype=torch.float32)
         # Mở rộng score
@@ -252,7 +241,7 @@ class ConditionedPNA(PNA):
 
         # loop over each graph instance in the minibatch
         for b in batch.unique():
-            mask = (batch == b)                    # nodes belonging to graph b
+            mask = (batch == b)         # nodes belonging to graph b
             nodes_b = mask.nonzero(as_tuple=True)[0]
 
             scores_b = score[nodes_b]
@@ -278,7 +267,6 @@ class ConditionedPNA(PNA):
             print("Selected edges empty?", len(selected_edges) == 0)
             print("k_b values:", k_b)
             print("e values:", e)
-
 
         if len(selected_edges) == 0:
             return torch.empty(0, dtype=torch.long, device=edge_index.device)
@@ -328,14 +316,14 @@ class ConditionedPNA(PNA):
             # 1) Select edges
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
             
-            # Xử lý trường hợp không chọn được cạnh nào (Edge case)
+            # Xử lý trường hợp không chọn được cạnh nào (Edge-empty case)
             if sel_edge_idx.numel() == 0:
                  score = self.score(hidden, rel_per_node).type(score.dtype)
                  continue
             
             e_sub = e_rep[:, sel_edge_idx]
 
-            # 2) Gating input (QUAN TRỌNG: Đã sửa lỗi dùng sai biến)
+            # 2) Gating input
             gate = torch.sigmoid(score).unsqueeze(-1)
             layer_input = gate * hidden  # Input đã được điều tiết bởi score
 
@@ -352,14 +340,10 @@ class ConditionedPNA(PNA):
                 out_deg_sub = torch.zeros(num_nodes_rep, device=device, dtype=torch.float32)
                 out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device, dtype=torch.float32))
                 node_out = torch.nonzero(out_deg_sub > 0, as_tuple=True)[0]
-                
-                # --- CODE CŨ (Gây lỗi) ---
-                # hidden[node_out] = hidden[node_out] + new_hidden[node_out]
-                
-                # --- CODE MỚI (Fix In-place) ---
+
                 # Tạo một tensor delta chứa toàn số 0
                 delta = torch.zeros_like(hidden)
-                
+
                 # Chỉ điền giá trị cập nhật vào các vị trí node_out
                 # (Dùng index put vào delta là an toàn vì delta mới được tạo, chưa tham gia tính toán trước đó)
                 delta[node_out] = new_hidden[node_out]
@@ -392,7 +376,6 @@ class ConditionedPNA(PNA):
         score_text_embs: node features (num_nodes, in_dim)  <- THIS is x
         all_index: original node indices (torch.arange(num_nodes))  (not used here)
         """
-        
 
         # 1) negative-sample swapping (same as before)
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)

@@ -7,14 +7,14 @@ To run this project, please first install all required packages:
 ```
 pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 ```
+
 ```
 pip install torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
 ```
+
 ```
 pip install -r requirements.txt
 ```
-
-
 
 ### Preprocessing
 
@@ -67,8 +67,8 @@ Please condiser citing our paper if it is helpful to your work!
 ```bigquery
 @inproceedings{MKGL,
   author       = {Lingbing Guo and
-                  Zhongpu Bo and 
-                  Zhuo Chen and 
+                  Zhongpu Bo and
+                  Zhuo Chen and
                   Yichi Zhang and
                   Jiaoyan Chen and
                   Lan Yarong and
@@ -88,4 +88,3 @@ Please condiser citing our paper if it is helpful to your work!
 ### Thanks
 
 We appreciate [LLaMA](https://github.com/facebookresearch/llama), [Huggingface Transformers](https://github.com/huggingface/transformers/tree/main/src/transformers/models/llama), [Alpaca](https://crfm.stanford.edu/2023/03/13/alpaca.html), [Alpaca-LoRA](https://github.com/tloen/alpaca-lora), and many other related works for their open-source contributions.
-
