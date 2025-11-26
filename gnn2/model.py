@@ -39,24 +39,26 @@ from torch_geometric.nn import PNAConv
 from torch_geometric.utils import degree
 
 
-def repeat_graph(edge_index: torch.LongTensor, num_nodes: int, batch_size: int):
-    """Repeat an edge_index `batch_size` times returning the tiled edge_index
-    and an offset tensor so that node indices can be shifted.
-
-    Returns:
-        edge_index_rep: (2, E * batch_size)
-        offset: (batch_size,) offsets to add to per-sample node indices
-    """
-    if batch_size == 1:
-        return edge_index.clone(), torch.zeros(1, dtype=torch.long)
-
+def repeat_graph(edge_index, num_nodes, batch_size):
     E = edge_index.size(1)
-    edge_index_rep = edge_index.repeat(1, batch_size).clone()
-    offsets = (torch.arange(batch_size, dtype=torch.long) * num_nodes).repeat_interleave(E)
+
+    # device sync is critical
+    device = edge_index.device
+
+    # Repeat edges
+    edge_index_rep = edge_index.repeat(1, batch_size)
+
+    # Offsets for each copy
+    offsets = (torch.arange(batch_size, device=device) * num_nodes)
+
+    # Expand offsets to match edge index shape
+    offsets = offsets.repeat_interleave(E)
+
+    # Add offsets to node indices
     edge_index_rep = edge_index_rep + offsets.unsqueeze(0)
 
-    offset_per_sample = (torch.arange(batch_size, dtype=torch.long) * num_nodes)
-    return edge_index_rep, offset_per_sample
+    return edge_index_rep, offsets
+
 
 
 def select_edges_pyg(edge_index: torch.LongTensor, score: torch.Tensor, batch: torch.LongTensor,
