@@ -1,26 +1,15 @@
-# --- Core Deep Learning (User Specified) ---
-torch==2.5.1
-torch_geometric==2.4.0
-
-# --- Graph Neural Network binaries ---
-# (These will be installed via specific command below, but listed here for tracking)
-torch_scatter
-torch_sparse
-
-# --- LLM & Tokenization ---
-transformers==4.36.0
-peft==0.9.0
-bitsandbytes==0.41.0
-accelerate==0.27.0
-sentencepiece      # REQUIRED for Llama-2 tokenizer
-protobuf           # REQUIRED for Llama-2 tokenizer
-
-# --- Data Processing & Utilities ---
-datasets           # REQUIRED for HF Datasets (fixed your AttributeError)
-pandas
-numpy
-swifter            # For parallel dataframe apply
-easydict           # For config loading
-pyyaml
-tqdm
+transformers==4.41 
+peft==0.9 
+bitsandbytes==0.41 
+accelerate==0.27 
+sentencepiece 
+protobuf 
+torch_geometric==2.4 
+datasets 
+pandas 
+numpy 
+swifter           
+easydict         
+pyyaml 
+tqdm 
 scikit-learn
