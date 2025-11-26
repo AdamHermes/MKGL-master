@@ -327,11 +327,11 @@ class ConditionedPNA(PNA):
             )
             e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
 
-            # Optional sanity check while debugging
-            # assert e_sub.dim() == 2 and e_sub.size(0) == 2
-            # assert e_sub.numel() == 0 or (
-            #     e_sub.min().item() >= 0 and e_sub.max().item() < num_nodes_rep
-            # )
+            # Debug
+            print(f"[DEBUG] Layer {i} degree histogram:", layer.deg)
+            print(f"[DEBUG] Layer {i} degree min/max:", layer.deg.min().item(), layer.deg.max().item())
+            print(f"[DEBUG] Layer {i} degree has NaN:", torch.isnan(layer.deg).any().item() if isinstance(layer.deg, torch.Tensor) else None)
+
 
             # 2) PNA update
             new_hidden = layer(hidden, e_sub)
