@@ -4,7 +4,6 @@ output_dir: &output_dir outputs/
 model_name: &model_name TinyLlama/TinyLlama-1.1B-Chat-v1.0
 kgl_token_length: 10
 
-
 dataset:
   class: FB15k237
   path: data/datasets/
@@ -25,11 +24,11 @@ loraconfig:
   r: &r 32
   lora_alpha: 8
   lora_dropout: 0.05
-  target_modules: 
-  # - embed_tokens
-  # - lm_head
-  - q_proj
-  - v_proj
+  target_modules:
+    # - embed_tokens
+    # - lm_head
+    - q_proj
+    - v_proj
 
 trainer:
   output_dir: *output_dir
@@ -39,7 +38,7 @@ trainer:
   per_device_eval_batch_size: 16
   eval_strategy: epoch
   eval_steps: 500
-  save_strategy: 'no' #epoch
+  save_strategy: "no" #epoch
   warmup_steps: 50
   bf16: yes
   logging_steps: 10
@@ -50,12 +49,12 @@ trainer:
   save_safetensors: no
   remove_unused_columns: no
   label_names:
-  - label
+    - label
   optim: adamw_8bit
   max_grad_norm: 1.
   ddp_find_unused_parameters: yes
   report_to:
-  - tensorboard
+    - tensorboard
 
 mkgl4kgc:
   criterion: bce
@@ -64,6 +63,7 @@ mkgl4kgc:
   adversarial_temperature: 1
 
 context_retriever:
+  llm_hidden_dim: &llm_hidden_dim 2048
   llm_hidden_dim: &llm_hidden_dim 2048
   r: *r
   text_encoder: pna

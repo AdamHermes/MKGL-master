@@ -1,3 +1,5 @@
+import os
+os.environ["MPLBACKEND"] = "Agg"
 import dataset
 from typing import Union
 import numpy as np
@@ -11,9 +13,6 @@ import argparse, easydict, yaml
 import json
 import pickle
 import os.path as osp
-import os
-
-
 
 
 class Prompter(object):
