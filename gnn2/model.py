@@ -129,34 +129,12 @@ class PNA(nn.Module):
     def forward(self, x, edge_index):
         num_nodes = x.size(0)
 
-        # Compute degrees dynamically
-        deg = degree(edge_index[0], num_nodes=num_nodes, dtype=x.dtype)
-
-        # Debug degree info
-        print("=== Degree Info ===")
-        print("deg shape:", deg.shape)
-        print("deg min/max:", deg.min().item(), deg.max().item())
-        if (deg == 0).any():
-            print("Warning: Some nodes have degree 0!")
-
         h = x
         for i, conv in enumerate(self.layers):
-            # Forward
-            h_new = conv(h, edge_index, deg=deg)
+            h_new = conv(h, edge_index)  # no wrong per-node deg
 
-            # Debug layer outputs
-            print(f"--- Layer {i} ---")
-            print("h_new min/max:", h_new.min().item(), h_new.max().item())
-            print("h_new has NaN:", torch.isnan(h_new).any().item())
-
-            # Shortcut connection
             if self.short_cut:
-                h_new += h
-
-            # Debug after shortcut
-            print(f"--- Layer {i} after shortcut ---")
-            print("h min/max:", h_new.min().item(), h_new.max().item())
-            print("h has NaN:", torch.isnan(h_new).any().item())
+                h_new = h_new + h
 
             h = h_new
 
@@ -309,47 +287,79 @@ class ConditionedPNA(PNA):
         # The rel embedding per-node (index by batch)
         rel_per_node = rel_embeds[batch_rep]  # shape (B*N, rel_dim)
 
-        # compute pna_degree_mean if needed (approx)
-        # use out-degree on e_rep
-        deg_out_rep = torch.zeros(num_nodes_rep, device=device, dtype=torch.long)
+        # ----------------------------------------------------
+        # 1) Degree per node in the repeated graph (out-degree)
+        # ----------------------------------------------------
         if e_rep.size(1) > 0:
-            src = e_rep[0]
-            deg_out_rep = torch.bincount(src, minlength=num_nodes_rep).to(device)
+            src = e_rep[0]  # source nodes of edges
+            deg_out_rep = torch.bincount(
+                src,
+                minlength=num_nodes_rep
+            )  # shape: (B * num_nodes,)
+        else:
+            # no edges → all degrees = 0
+            deg_out_rep = torch.zeros(num_nodes_rep, device=device, dtype=torch.long)
 
-        # iterate layers
+        # ----------------------------------------------------
+        # 2) Build *degree histogram* for PNAConv
+        #    PNAConv expects "deg" = histogram over degrees,
+        #    not per-node degree vector.
+        # ----------------------------------------------------
+        max_deg = int(deg_out_rep.max().item())
+        # deg_hist[k] = number of nodes with degree k
+        deg_hist = torch.bincount(deg_out_rep, minlength=max_deg + 1)
+
+        # Make sure it's on the right device/dtype
+        deg_hist = deg_hist.to(device)
+
+        # Assign this histogram to all PNAConv layers
+        for conv in self.layers:
+            conv.deg = deg_hist
+
+        # ----------------------------------------------------
+        # 3) Now run the PNAConv layers safely
+        # ----------------------------------------------------
         for i, layer in enumerate(self.layers):
             # 1) Select edges
-            sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
+            sel_edge_idx = select_edges_pyg(
+                e_rep, score, batch_rep,
+                self.node_ratio, self.degree_ratio
+            )
             e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
 
+            # Optional sanity check while debugging
+            # assert e_sub.dim() == 2 and e_sub.size(0) == 2
+            # assert e_sub.numel() == 0 or (
+            #     e_sub.min().item() >= 0 and e_sub.max().item() < num_nodes_rep
+            # )
 
-            # Ensure e_sub is a proper tensor
-                # No edges selected, use default degree=1
-                # Make sure e_sub is contiguous and 2D (2, E)
-                # Compute degree using the source nodes
-
-            # 3) PNA update
-            print("input_embeds min/max/nan:", torch.isnan(e_sub).any())
-
+            # 2) PNA update
             new_hidden = layer(hidden, e_sub)
 
-            # Debug
-            print(f"Layer {i}: new_hidden min/max/nan: {new_hidden.min().item()}, {new_hidden.max().item()}, {torch.isnan(new_hidden).any()}")
+            print(f"Layer {i}: new_hidden min/max/nan: "
+                f"{new_hidden.min().item()}, "
+                f"{new_hidden.max().item()}, "
+                f"{torch.isnan(new_hidden).any()}")
 
-            # 4) Update hidden
+            # 3) Update hidden (your existing logic)
             if e_sub.size(1) > 0:
-                out_deg_sub = torch.zeros(num_nodes_rep, device=device, dtype=torch.float32)
-                out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device, dtype=torch.float32))
+                out_deg_sub = torch.zeros(
+                    num_nodes_rep, device=device, dtype=torch.float32
+                )
+                out_deg_sub.scatter_add_(
+                    0, e_sub[0],
+                    torch.ones(e_sub.size(1), device=device, dtype=torch.float32)
+                )
                 node_out = torch.nonzero(out_deg_sub > 0, as_tuple=True)[0]
                 hidden[node_out] = hidden[node_out] + new_hidden[node_out]
             else:
                 hidden = hidden + new_hidden
 
-            # 5) Recompute score
+            # 4) Recompute score
             score = self.score(hidden, rel_per_node).type(score.dtype)
-            print(f"Layer {i}: score min/max/nan: {score.min().item()}, {score.max().item()}, {torch.isnan(score).any()}")
-
-
+            print(f"Layer {i}: score min/max/nan: "
+                f"{score.min().item()}, {score.max().item()}, "
+                f"{torch.isnan(score).any()})")
 
         return score
 
