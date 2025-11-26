@@ -330,10 +330,28 @@ class ConditionedPNA(nn.Module):
         t_emb = torch.zeros_like(x_rep)
 
         # compute flat indices
+        # compute flat indices
         flat_h_idx = h_index_rep[:, 0].view(-1)
         flat_t_idx = t_index_rep[:, 0].view(-1)
-        h_emb[flat_h_idx] = orig_h_emb.repeat_interleave(num_nodes, dim=0)[:h_emb[flat_h_idx].size(0)]
-        t_emb[flat_t_idx] = orig_t_emb.repeat_interleave(num_nodes, dim=0)[:t_emb[flat_t_idx].size(0)]
+
+        # repeat embeddings safely
+        print("=== Debug h_emb assignment ===")
+        print("h_emb shape:", h_emb.shape, "device:", h_emb.device)
+        print("flat_h_idx shape:", flat_h_idx.shape, "device:", flat_h_idx.device)
+        print("orig_h_emb shape:", orig_h_emb.shape, "device:", orig_h_emb.device)
+        print("flat_h_idx max:", flat_h_idx.max().item(), "h_emb size(0):", h_emb.size(0))
+        repeat_count_h = (flat_h_idx.size(0) // orig_h_emb.size(0)) + 1
+        repeat_count_t = (flat_t_idx.size(0) // orig_t_emb.size(0)) + 1
+
+        expanded_h_emb = orig_h_emb.repeat_interleave(repeat_count_h, dim=0)[:flat_h_idx.size(0)]
+        expanded_t_emb = orig_t_emb.repeat_interleave(repeat_count_t, dim=0)[:flat_t_idx.size(0)]
+        
+        print("expanded_h_emb shape:", expanded_h_emb.shape)
+
+        # assign to repeated embeddings
+        h_emb[flat_h_idx] = expanded_h_emb
+        t_emb[flat_t_idx] = expanded_t_emb
+
 
         # init input embeds and initial score
         input_embeds, init_score = self.init_input_embeds(x_rep, h_emb, flat_h_idx, t_emb, flat_t_idx, rel_embeds.repeat_interleave(num_nodes), batch_rep)
