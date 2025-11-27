@@ -11,6 +11,8 @@ from torch_geometric.utils import degree
 # Helper Functions (TorchDrug → PyG)
 #############################################
 
+
+
 def repeat_graph(x: torch.Tensor, edge_index: torch.Tensor, batch_size: int):
     """
     Repeat node features x (N, D) and edge_index (2, E) batch_size times.
@@ -36,6 +38,8 @@ def repeat_graph(x: torch.Tensor, edge_index: torch.Tensor, batch_size: int):
 
     return x_rep, edge_index_rep, node_batch
 
+
+
 def neighbors(edge_index, nodes):
     """
     Returns (edge_idx, neighbor_nodes)
@@ -45,6 +49,8 @@ def neighbors(edge_index, nodes):
     out_edges = torch.nonzero(mask).squeeze(-1)
     out_nodes = col[mask]
     return out_edges, out_nodes
+
+
 
 def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0):
     """
@@ -92,18 +98,22 @@ def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0)
         return torch.empty(0, dtype=torch.long, device=device)
     return torch.cat(selected)
 
+
 #############################################
 # PyG PNA (simple backbone)
 #############################################
 
+
+
+
 class PNA(nn.Module):
-    def __init__(self, in_dim, out_dim, num_relations, num_layers=3, avg_deg=1.0):
+    def __init__(self, in_dim, out_dim, num_relations, num_layers=3):
         super().__init__()
         aggr = ['mean', 'max', 'min', 'std']
         scalers = ['identity', 'amplification', 'attenuation']
 
         self.layers = nn.ModuleList()
-        deg_hist = torch.tensor([1] * 10 + [int(avg_deg)*2] * 10, dtype=torch.float)
+        deg_placeholder = torch.ones(1)  # temp placeholder
         for _ in range(num_layers):
             self.layers.append(
                 PNAConv(
@@ -111,13 +121,12 @@ class PNA(nn.Module):
                     out_dim,
                     aggregators=aggr,
                     scalers=scalers,
-                    deg=deg_hist,
+                    deg=deg_placeholder
                 )
             )
         self.short_cut = True
 
     def forward(self, x, edge_index):
-        x = x.to(torch.float32)
         num_nodes = x.size(0)
 
         # Compute degrees dynamically
@@ -152,8 +161,12 @@ class PNA(nn.Module):
             h = h_new
 
         return h
-    
+
+
+
+
 #############################################
+
 # PyG ConditionedPNA (Faithful Rewrite)
 #############################################
 
@@ -165,13 +178,14 @@ class ConditionedPNA(PNA):
         num_relations,
         num_layers=3,
         node_ratio=0.1,
-        degree_ratio=1.0,
+        degree_ratio=1.0
     ):
-        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers, avg_deg=1.0)
+        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers)
 
         self.node_ratio = node_ratio
         self.degree_ratio = degree_ratio
         self.num_relations = num_relations
+
         # backbone GNN
 
         self.rel_embedding = nn.Embedding(num_relations * 2, in_dim)
@@ -185,8 +199,6 @@ class ConditionedPNA(PNA):
             nn.Linear(out_dim, 1)
         )
 
-        self.layer_norms = nn.ModuleList([nn.LayerNorm(out_dim) for _ in range(num_layers)])
-
     ###########################################
     # scoring
     ###########################################
@@ -195,6 +207,7 @@ class ConditionedPNA(PNA):
         heur = self.linear(h)
         x = heur * hidden
         return self.mlp(x).squeeze(-1)
+
 
     ###########################################
     # negative sample swapping
@@ -210,22 +223,17 @@ class ConditionedPNA(PNA):
     # init input embeddings
     ###########################################
     def init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch):
-        # Tạo x với dtype mặc định
-        x = x.clone()
-        # Đảm bảo t_emb và h_emb cùng kiểu với x trước khi gán
-        x[t_idx] = t_emb.to(x.dtype)
-        x[h_idx] = h_emb.to(x.dtype)
-        # Tính score "nền" (background) dựa trên relation embedding và vector 0
-        dummy_hidden = torch.zeros_like(rel_emb)
-        background_score = self.score(dummy_hidden, rel_emb)
-        # Mở rộng background score cho từng node dựa trên batch index
-        score = background_score[batch]
-        score = score.to(torch.float32)
-        # score = torch.zeros(batch.size(0), device=x.device, dtype=torch.float32)
-        calculated_score = self.score(h_emb, rel_emb)
-        score[h_idx] = calculated_score.to(dtype=torch.float32)
-        # Mở rộng score
-        # score = score.repeat_interleave((batch == batch.unique()[0]).sum())
+        x = torch.zeros_like(x)
+        #x = x.to(torch.bfloat16)
+        x[t_idx] = t_emb
+        x[h_idx] = h_emb
+
+        # score = 0 for all nodes, except head
+        score = torch.zeros(batch.size(0), device=x.device)
+        score = score.to(torch.bfloat16)
+        score[h_idx] = self.score(h_emb, rel_emb)
+        score = score.repeat_interleave((batch == batch.unique()[0]).sum())
+
         return x, score
 
     ###########################################
@@ -241,7 +249,7 @@ class ConditionedPNA(PNA):
 
         # loop over each graph instance in the minibatch
         for b in batch.unique():
-            mask = (batch == b)         # nodes belonging to graph b
+            mask = (batch == b)                    # nodes belonging to graph b
             nodes_b = mask.nonzero(as_tuple=True)[0]
 
             scores_b = score[nodes_b]
@@ -268,6 +276,7 @@ class ConditionedPNA(PNA):
             print("k_b values:", k_b)
             print("e values:", e)
 
+
         if len(selected_edges) == 0:
             return torch.empty(0, dtype=torch.long, device=edge_index.device)
 
@@ -292,10 +301,6 @@ class ConditionedPNA(PNA):
         device = x_rep.device
         num_nodes_rep = x_rep.size(0)
 
-        input_embeds = input_embeds.float()
-        init_score = init_score.float()
-        rel_embeds = rel_embeds.float()
-
         # boundary and score equivalent
         boundary = input_embeds.clone()
         score = init_score.clone()
@@ -315,50 +320,36 @@ class ConditionedPNA(PNA):
         for i, layer in enumerate(self.layers):
             # 1) Select edges
             sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, self.node_ratio, self.degree_ratio)
-            
-            # Xử lý trường hợp không chọn được cạnh nào (Edge-empty case)
-            if sel_edge_idx.numel() == 0:
-                 score = self.score(hidden, rel_per_node).type(score.dtype)
-                 continue
-            
-            e_sub = e_rep[:, sel_edge_idx]
+            e_sub = e_rep if sel_edge_idx.numel() == 0 else e_rep[:, sel_edge_idx]
 
-            # 2) Gating input
-            gate = torch.sigmoid(score).unsqueeze(-1)
-            layer_input = gate * hidden  # Input đã được điều tiết bởi score
+
+            # Ensure e_sub is a proper tensor
+                # No edges selected, use default degree=1
+                # Make sure e_sub is contiguous and 2D (2, E)
+                # Compute degree using the source nodes
 
             # 3) PNA update
-            # print("input_embeds min/max/nan:", torch.isnan(e_sub).any())
+            print("input_embeds min/max/nan:", torch.isnan(e_sub).any())
 
-            new_hidden = layer(layer_input, e_sub).to(hidden.dtype)
+            new_hidden = layer(hidden, e_sub)
 
             # Debug
-            # print(f"Layer {i}: new_hidden min/max/nan: {new_hidden.min().item()}, {new_hidden.max().item()}, {torch.isnan(new_hidden).any()}")
+            print(f"Layer {i}: new_hidden min/max/nan: {new_hidden.min().item()}, {new_hidden.max().item()}, {torch.isnan(new_hidden).any()}")
 
             # 4) Update hidden
             if e_sub.size(1) > 0:
                 out_deg_sub = torch.zeros(num_nodes_rep, device=device, dtype=torch.float32)
                 out_deg_sub.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device, dtype=torch.float32))
                 node_out = torch.nonzero(out_deg_sub > 0, as_tuple=True)[0]
-
-                # Tạo một tensor delta chứa toàn số 0
-                delta = torch.zeros_like(hidden)
-
-                # Chỉ điền giá trị cập nhật vào các vị trí node_out
-                # (Dùng index put vào delta là an toàn vì delta mới được tạo, chưa tham gia tính toán trước đó)
-                delta[node_out] = new_hidden[node_out]
-                
-                # Cộng tạo ra tensor mới: hidden mới = hidden cũ + delta
-                hidden = hidden + delta
-                
+                hidden[node_out] = hidden[node_out] + new_hidden[node_out]
             else:
                 hidden = hidden + new_hidden
-            
-            hidden = self.layer_norms[i](hidden)
 
             # 5) Recompute score
             score = self.score(hidden, rel_per_node).type(score.dtype)
-            # print(f"Layer {i}: score min/max/nan: {score.min().item()}, {score.max().item()}, {torch.isnan(score).any()}")
+            print(f"Layer {i}: score min/max/nan: {score.min().item()}, {score.max().item()}, {torch.isnan(score).any()}")
+
+
 
         return score
 
@@ -376,6 +367,7 @@ class ConditionedPNA(PNA):
         score_text_embs: node features (num_nodes, in_dim)  <- THIS is x
         all_index: original node indices (torch.arange(num_nodes))  (not used here)
         """
+        
 
         # 1) negative-sample swapping (same as before)
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
@@ -390,8 +382,7 @@ class ConditionedPNA(PNA):
         tail_orig_idx = t_index[:, 0].clone()   # shape (batch_size,)
 
         # 3) build repeated graph tensors (repeat node features and edges)
-        edge_index_undirected = to_undirected(graph.edge_index)
-        x_rep, e_rep, batch_rep = repeat_graph(score_text_embs, edge_index_undirected, batch_size)
+        x_rep, e_rep, batch_rep = repeat_graph(score_text_embs, graph.edge_index, batch_size)
         # x_rep: (B * num_nodes, in_dim)
         # e_rep: (2, B * num_edges)
         # batch_rep: (B * num_nodes,)
@@ -422,14 +413,14 @@ class ConditionedPNA(PNA):
             rel_embeds.to(x_rep.dtype),
             batch_rep
         )
-        # print("=== Forward: input stats ===")
-        # print("x_rep min/max/nan:", x_rep.min().item(), x_rep.max().item(), torch.isnan(x_rep).any())
-        # print("head_embs min/max/nan:", head_embs.min().item(), head_embs.max().item(), torch.isnan(head_embs).any())
-        # print("tail_embs min/max/nan:", tail_embs.min().item(), tail_embs.max().item(), torch.isnan(tail_embs).any())
-        # print("rel_embeds min/max/nan:", rel_embeds.min().item(), rel_embeds.max().item(), torch.isnan(rel_embeds).any())
-        # print("input_embeds min/max/nan:", input_embeds.min().item(), input_embeds.max().item(), torch.isnan(input_embeds).any())
-        # print("init_score min/max/nan:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
-        # print("Score stats Bef:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
+        print("=== Forward: input stats ===")
+        print("x_rep min/max/nan:", x_rep.min().item(), x_rep.max().item(), torch.isnan(x_rep).any())
+        print("head_embs min/max/nan:", head_embs.min().item(), head_embs.max().item(), torch.isnan(head_embs).any())
+        print("tail_embs min/max/nan:", tail_embs.min().item(), tail_embs.max().item(), torch.isnan(tail_embs).any())
+        print("rel_embeds min/max/nan:", rel_embeds.min().item(), rel_embeds.max().item(), torch.isnan(rel_embeds).any())
+        print("input_embeds min/max/nan:", input_embeds.min().item(), input_embeds.max().item(), torch.isnan(input_embeds).any())
+        print("init_score min/max/nan:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
+        print("Score stats Bef:", init_score.min().item(), init_score.max().item(), torch.isnan(init_score).any())
 
         # 8) aggregate / run the conditioned PNA logic (your aggregate expects graph-like object)
         # The original TorchDrug code passes a graph-like object. Here we must adapt:
@@ -478,4 +469,3 @@ class ConditionedPNA(PNA):
 
         # 10) final indexing to get scores for requested tails (t_index already shifted to repeated index)
         return final
-    
