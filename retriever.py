@@ -104,33 +104,53 @@ class ContextRetriever(BasePNARetriever):
 
         
 class ScoreRetriever(BasePNARetriever):
+    """
+    Score retriever using GAT for knowledge graph reasoning.
+    Compatible with the provided YAML config structure.
+    """
     
     def __init__(self, config, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         cfg_kg = config.kg_encoder
-
-        self.kg_retriever = ConditionedPNA(
-            in_dim=cfg_kg.in_dim,
-            out_dim=cfg_kg.out_dim,
-            num_relations=cfg_kg.num_relations,
-            num_layers=cfg_kg.get("num_layer", 6),
-            node_ratio=cfg_kg.get("node_ratio", 0.1),
-            degree_ratio=cfg_kg.get("degree_ratio", 1),
-        )
-        #self.kg_retriever = ConditionedPNA(config.kg_encoder)
-        self.h_down_scaling = nn.Linear(
-                self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
-        self.r_down_scaling = nn.Linear(
-                self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
-
-    def forward(self, h_id, r_id, t_id,  hidden_states, rel_hidden_states, graph, all_index, all_kgl_index):
-
-        score_text_embs = super().forward(all_kgl_index)
-        head_embeds = self.h_down_scaling(hidden_states) 
-        rel_embeds = self.r_down_scaling(rel_hidden_states) 
-        score = self.kg_retriever(h_id, r_id, t_id, head_embeds, rel_embeds, graph, score_text_embs,all_index)
         
-        return score
+        # Build base_layer config dict from YAML config
+        base_layer_config = {
+            'input_dim': cfg_kg.base_layer.input_dim,
+            'output_dim': cfg_kg.base_layer.output_dim,
+            'query_input_dim': cfg_kg.base_layer.query_input_dim,
+            'layer_norm': cfg_kg.base_layer.layer_norm,
+            'dependent': cfg_kg.base_layer.dependent,
+            'num_heads': getattr(cfg_kg.base_layer, 'num_heads', 4),
+            'dropout': getattr(cfg_kg.base_layer, 'dropout', 0.1),
+            'aggregate_func': cfg_kg.base_layer.aggregate_func,
+        }
+        
+        # Initialize ConditionedGAT (replaces ConditionedPNA)
+        self.kg_retriever = ConditionedGAT(
+            base_layer=base_layer_config,
+            num_layer=cfg_kg.num_layer,
+            num_mlp_layer=getattr(cfg_kg, 'num_mlp_layer', 2),
+            node_ratio=cfg_kg.node_ratio,
+            degree_ratio=getattr(cfg_kg, 'degree_ratio', 1.0),
+            test_node_ratio=getattr(cfg_kg, 'test_node_ratio', None),
+            test_degree_ratio=getattr(cfg_kg, 'test_degree_ratio', None),
+            remove_one_hop=cfg_kg.remove_one_hop,
+            break_tie=getattr(cfg_kg, 'break_tie', False)
+        )
+        
+        # Down-scaling projections
+        self.h_down_scaling = nn.Linear(
+            self.config.llm_hidden_dim,
+            self.config.r,
+            bias=False,
+            dtype=torch.float
+        )
+        self.r_down_scaling = nn.Linear(
+            self.config.llm_hidden_dim,
+            self.config.r,
+            bias=False,
+            dtype=torch.float
+        )
 
 class RelScoreRetriever(BasePNARetriever):
     
