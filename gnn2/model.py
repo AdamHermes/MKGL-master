@@ -379,10 +379,9 @@ class ConditionedGAT(nn.Module):
         """Make graph undirected."""
         edge_index = graph.edge_index
         inverse_edges = torch.stack([edge_index[1], edge_index[0]], dim=0)
-        new_edge_index = torch.cat([edge_index, inverse_edges], dim=1)
-
-        graph.edge_index = new_edge_index
-        return graph
+        new_graph = graph.clone() 
+        new_graph.edge_index = torch.cat([edge_index, inverse_edges], dim=1)
+        return new_graph
     
     def remove_easy_edges(self, graph, h_index, r_index, t_index):
         """Remove edges that make training too easy."""
