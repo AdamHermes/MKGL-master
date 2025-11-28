@@ -1,465 +1,131 @@
-import numpy as np
-import pandas as pd
-from typing import List, Optional, Tuple, Union, OrderedDict
 import torch
-from torch import nn
-import torch.nn.functional as F
-from torch.utils import data as torch_data
-from torch_geometric.data import Data
+import torch.nn as nn
+from transformers import PreTrainedModel, PretrainedConfig
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from transformers import LlamaForCausalLM, LlamaConfig
-from transformers.modeling_outputs import SequenceClassifierOutputWithPast
-
-#from torchdrug import core, tasks
-#from gnn.model import PNA
-from retriever import *
-
-class MKGLConfig(LlamaConfig):
-    model_type = 'mkgl_config'
-
-    def __init__(self,
-                 **kwargs):
-        super().__init__(**kwargs)
-
-class MKGL(LlamaForCausalLM):
-    config_class = MKGLConfig
-
-    def __init__(self, config):
-        super().__init__(config)
-
-    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg,):
-        self.kgl2token = kgl2token
-        self.orig_vocab_size = orig_vocab_size
+class MKGL(nn.Module):
+    """
+    The unified MKGL Model.
+    1. Input Processing: Detects <rdf: entity> tokens -> Context Retriever.
+    2. Context Processing: Runs LLM (PEFT/LoRA).
+    3. Output Processing: Uses LLM hidden state -> Score Retriever -> Entity Logits.
+    """
+    def __init__(self, llm_model, context_retriever, score_retriever, kg_graph, orig_vocab_size):
+        super().__init__()
+        self.llm = llm_model
+        self.context_retriever = context_retriever
+        self.score_retriever = score_retriever
         
-        device = self.lm_head.weight.device
-        self.context_retriever = ContextRetriever(cfg.context_retriever, self.get_input_embeddings().weight.data, kgl2token, orig_vocab_size).to(device)
-        self.score_retriever = ScoreRetriever(cfg.score_retriever, self.lm_head.weight.data, kgl2token, orig_vocab_size).to(device)
-
-        # self._init_kg_score(len(kgl_vocab), r)
-
-    def _init_kg_score(self, num_kg_tokens, ent_inter_emb_dim=64):
-        device = self.lm_head.weight.device
-
-        def kg_lora_layer(output_dim=num_kg_tokens):
-            linear_a = nn.Linear(
-                self.config.hidden_size, ent_inter_emb_dim, bias=False, dtype=torch.float, device=device)
-            linear_b = nn.Linear(
-                ent_inter_emb_dim, output_dim, bias=False, dtype=torch.float, device=device)
-
-            nn.init.xavier_normal_(linear_a.weight)
-            # nn.init.xavier_normal_(linear_b.weight)
-            nn.init.zeros_(linear_b.weight)
-            return nn.Sequential(OrderedDict([
-                ('linear_a', linear_a),
-                ('dropout', nn.Dropout(.2)),
-                ('linear_b', linear_b),
-            ]))
-
-        self.kg_score = kg_lora_layer()
-
+        # Registered buffers for graph data (kept on same device as model)
+        self.register_buffer("edge_index", kg_graph.edge_index)
+        self.register_buffer("kg_nodes", torch.arange(kg_graph.num_nodes))
+        
+        self.orig_vocab_size = orig_vocab_size
+        self.loss_fct = nn.BCEWithLogitsLoss() # Contrastive/Binary loss for ranking
 
     def forward(
         self,
-        h_id,
-        r_id,
-        t_id,
-        h_kgl_tokenid,
-        r_kgl_tokenid,
-        graph,
-        all_index,
-        all_kgl_index,
-        input_ids,
-        attention_mask,
-        input_length,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
+        input_ids=None,
+        attention_mask=None,
+        labels=None, # In MKGL, labels are usually the ID of the true tail entity
+        **kwargs
+    ):
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # ==========================================
+        # 1. Context Retrieval (Input Injection)
+        # ==========================================
         
-        batch_size = h_kgl_tokenid.shape[0]
-        device = self.lm_head.weight.device
+        # Standard embeddings
+        inputs_embeds = self.llm.get_input_embeddings()(input_ids)
+        
+        # Detect KG tokens (those added after original vocab)
+        kg_mask = input_ids >= self.orig_vocab_size
+        
+        if kg_mask.any():
+            kg_token_ids = input_ids[kg_mask]
+            # Map back to KG IDs (0 to N)
+            kg_ids = kg_token_ids - self.orig_vocab_size
+            
+            # Retrieve dynamic embeddings
+            # Note: We pass the full graph edge_index. 
+            # PyG PNAConv handles the indexing internally if x is full size, 
+            # or we map kg_ids to a subgraph. 
+            # Here assumes 'kg_ids' are valid indices into the graph nodes.
+            retrieved_embs = self.context_retriever(kg_ids, self.edge_index)
+            
+            # Inject into the embedding tensor
+            inputs_embeds[kg_mask] = retrieved_embs.to(inputs_embeds.dtype)
 
-        mask = input_ids < self.orig_vocab_size
-        token_embs = self.get_input_embeddings()(input_ids[mask])
-        kgl_token_embs = self.context_retriever(input_ids[~mask], graph, all_index, all_kgl_index)
-
-        rel_token_embs = self.context_retriever(r_kgl_tokenid, graph, all_index, all_kgl_index)
-
-        input_embs = torch.zeros(
-            *input_ids.shape, self.config.hidden_size, dtype=torch.half).to(device)
-        input_embs[mask] = token_embs.type(input_embs.dtype)
-        input_embs[~mask] = kgl_token_embs.type(input_embs.dtype)
-
-        transformer_outputs = self.model(
+        # ==========================================
+        # 2. LLM Forward Pass
+        # ==========================================
+        outputs = self.llm(
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=input_embs,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            output_hidden_states=True,
+            return_dict=True,
+            **kwargs
         )
-
-        # batch_size, seq_len, hidden_state
-        hidden_states = transformer_outputs[0]
-
-        # select the last output of llm, batch_size x hidden_size
-        hr_hidden_states = hidden_states[torch.arange(
-            batch_size, device=hidden_states.device), input_length-1]
-
-        rel_hidden_states = hidden_states[torch.arange(
-            batch_size, device=hidden_states.device), input_length-2]
-
-
-        pred = self.score_retriever(h_id, r_id, t_id, hr_hidden_states, rel_token_embs, graph, all_index, all_kgl_index)
-        return pred
-    
-
-    def get_input_kg_embeddings(self, kgl_token_ids):
-        kgl_token_ids = kgl_token_ids - self.orig_vocab_size
-        if token_embs is None:
-            token_embs = self.get_input_embeddings().weight.data
-        device = token_embs.device
-
-        kg_token_ids = self.kgl_vocab
-        kg_token_mask = kg_token_ids > 0
-        kg_token_lengths = kg_token_mask.float().sum(axis=-1)
-
-        # shape: num_ents x hidden_size
-        results = (token_embs[kg_token_ids.to(device)] *
-                   kg_token_mask.unsqueeze(-1).to(device)).sum(axis=1).squeeze() / kg_token_lengths.unsqueeze(-1).float().to(device)
-
-        if self.apply_norm:
-            results = self.norm(results)
-        return results
-    
-    def norm(self, x):
-        return F.normalize(x, p=2, dim=1)
-    
-def edge_mask(graph, mask: torch.Tensor):
-    # mask: boolean tensor of size [num_edges]
-    new_data = graph.clone()
-    for key in graph.keys():  # call keys()!
-        item = getattr(graph, key)
-        if isinstance(item, torch.Tensor) and item.size(0) == graph.edge_index.size(1):
-            # edge-level attribute
-            setattr(new_data, key, item[mask])
-    return new_data
-
-
-class KGL4KGC(nn.Module):
-
-    def __init__(self, config, llmodel, dataset):
-        super().__init__()
-        self.llmodel = llmodel
-        self.dataset = dataset
-        self.num_negative = config.num_negative
-        self.adversarial_temperature = config.adversarial_temperature
-        self.strict_negative = config.strict_negative
         
-        train_set, valid_set, test_set = dataset.kgdata.split()
-        self.preprocess(train_set, valid_set, test_set)
+        # Get the last hidden state of the last token (the query for the tail)
+        # (Batch, Hidden)
+        last_hidden_state = outputs.hidden_states[-1][:, -1, :]
 
-    @property
-    def device(self):
-        return self.llmodel.lm_head.weight.device
-
-    
-    def loss(self, pred, target, all_loss=None):
-        metric = {}
-        target = torch.zeros_like(pred)
-        target[:, 0] = 1
-        loss = F.binary_cross_entropy_with_logits(
-            pred, target, reduction="none")
-
-        neg_weight = torch.ones_like(pred)
-        if self.adversarial_temperature > 0:
-            with torch.no_grad():
-                neg_weight[:, 1:] = F.softmax(
-                    pred[:, 1:] / self.adversarial_temperature, dim=-1)
+        # ==========================================
+        # 3. Score Retrieval (Tail Prediction)
+        # ==========================================
+        
+        if labels is not None:
+            # TRAINING: Contrastive Loss
+            # We score the True Tail vs a set of Negatives.
+            # In the new logic, we score ALL entities (or a sampled subset) efficiently.
+            
+            # For this implementation, let's score all nodes in the graph (or a subgraph).
+            # We assume labels contains the KG ID of the target tail.
+            
+            # Run Score Retriever
+            # Returns logits for all candidates: (Batch, Num_Candidates) or (Num_Nodes) if batch=1
+            all_scores = self.score_retriever(
+                last_hidden_state, 
+                self.kg_nodes, 
+                self.edge_index
+            )
+            
+            # Construct Target Tensor
+            # Create a one-hot or multi-hot vector for BCE loss
+            target = torch.zeros_like(all_scores)
+            
+            # We need to map labels (KG IDs) to indices in all_scores
+            # If all_scores covers all nodes 0..N, labels are direct indices.
+            if labels.dim() > 1: labels = labels.squeeze()
+            
+            # Only set 1s for valid labels that are within range (ignore padding -100)
+            valid_labels = labels[labels >= 0]
+            target[valid_labels] = 1.0
+            
+            loss = self.loss_fct(all_scores, target)
+            
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=all_scores.unsqueeze(0), # Dummy logits shape
+                hidden_states=outputs.hidden_states
+            )
         else:
-            neg_weight[:, 1:] = 1 / self.num_negative
-        loss = (loss * neg_weight).sum(dim=-1) / neg_weight.sum(dim=-1)
-        loss = loss.mean()
+            # INFERENCE
+            all_scores = self.score_retriever(
+                last_hidden_state, 
+                self.kg_nodes, 
+                self.edge_index
+            )
+            return CausalLMOutputWithPast(
+                logits=all_scores.unsqueeze(0)
+            )
 
-        
-        if all_loss is not None:
-            loss = loss + all_loss
-            
-        metric['loss'] = loss
-        
-        return loss, metric
-    
-    def forward(self, batch, all_loss=None, metric=None, label=None):
-        device = batch.h_id.device
-        
-        if self.training:
-            all_loss = torch.tensor(0, dtype=torch.float, device=device)
-            pred = self.predict(batch, all_loss, metric)
-            
-            target = torch.zeros_like(pred)
-            target[:, 0] = 1
-            
-            return self.loss(pred, target)
-        
-        else:
-            with torch.no_grad():
-                pred, (mask, target) = self.predict_and_target(batch)
-                label = torch.zeros_like(pred)
-                label[:, target] = 1
-                loss, _ = self.loss(pred, label)
-                pos_pred = pred.gather(-1, target.unsqueeze(-1))
-                # filter rank
-                ranking = torch.sum((pos_pred <= pred) & mask, dim=-1) + 1
-                return loss, ranking.to(device)
-        
-    
-    def predict(self, batch, all_loss=None, metric=None):
-        pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
-        device = pos_h_index.device
-        batch_size = len(batch.h_id)
-        graph = self.get_graph(batch).to(device)
-        
-        # graph feature
-        all_index = torch.arange(graph.num_nodes, device=device)
-        all_kgl_index = self.id2tokenid(all_index, split=batch.split)
-        
-        if self.training:
-            # train
-            neg_index = self._strict_negative(
-               pos_h_index, pos_t_index, pos_r_index)
-            #neg_t_index, neg_h_index = self._strict_negative(pos_h_index, pos_t_index, pos_r_index)
-
-            h_index = pos_h_index.unsqueeze(-1).repeat(2,
-                                                       self.num_negative + 1)
-            t_index = pos_t_index.unsqueeze(-1).repeat(2,
-                                                       self.num_negative + 1)
-            r_index = pos_r_index.unsqueeze(-1).repeat(2,
-                                                       self.num_negative + 1)
-            t_index[:batch_size, 1:] = neg_index[:batch_size]        # tail negatives
-            h_index[batch_size:, 1:] = neg_index[batch_size:]        # head negatives
-
-            
-            h_id, r_id, t_id = h_index, r_index, t_index
-        else:
-            # test all
-            h_index, t_index = torch.meshgrid(pos_h_index, all_index)  # batch size x num ent
-            # inverse
-            it_index, ih_index = torch.meshgrid(pos_t_index, all_index)
-            
-            r_index = pos_r_index.unsqueeze(-1).expand(-1, len(all_index))
-            
-            # triplet feature
-            h_id = torch.cat([h_index, ih_index])
-            r_id = torch.cat([r_index, r_index])
-            t_id = torch.cat([t_index, it_index])
-            
-        # llm feature
-        h_kgl_tokenid = torch.cat([batch.h_tokenid, batch.t_tokenid])
-        r_kgl_tokenid = torch.cat([batch.r_tokenid, batch.inv_r_tokenid])
-        input_ids = batch.input_ids
-        attention_mask = batch.attention_mask
-        input_length = batch.input_length
-        
-        pred = self.llmodel(h_id,
-                            r_id,
-                            t_id,
-                            h_kgl_tokenid,
-                            r_kgl_tokenid,
-                            graph,
-                            all_index,
-                            all_kgl_index,
-                            input_ids,
-                            attention_mask,
-                            input_length,
-                            )
-        return pred
-    
-    def target(self, batch):
-        pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
-        batch_size = len(pos_h_index)
-        graph = self.get_eval_graph(batch)  # PyG Data object
-
-        device = pos_h_index.device
-        num_nodes = graph.num_nodes
-
-        # Move graph tensors to the same device
-        h_all = graph.edge_index[0].to(device)
-        t_all = graph.edge_index[1].to(device)
-        r_all = graph.edge_type.to(device)  # make sure edge_type exists
-
-        #########################################
-        # 1. Mask for tail prediction (t unknown)
-        #########################################
-        mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
-                (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        matched_edges_t = mask_t.nonzero(as_tuple=False)
-        edge_idx_t = matched_edges_t[:, 0]
-        num_t_truth = mask_t.sum(dim=0)
-
-        t_truth_index = t_all[edge_idx_t]
-        pos_index = torch.repeat_interleave(num_t_truth)
-        t_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
-        t_mask[pos_index, t_truth_index] = 0
-
-        #########################################
-        # 2. Mask for head prediction (h unknown)
-        #########################################
-        mask_h = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
-                (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        matched_edges_h = mask_h.nonzero(as_tuple=False)
-        edge_idx_h = matched_edges_h[:, 0]
-        num_h_truth = mask_h.sum(dim=0)
-
-        h_truth_index = h_all[edge_idx_h]
-        pos_index = torch.repeat_interleave(num_h_truth)
-        h_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
-        h_mask[pos_index, h_truth_index] = 0
-
-        #########################################
-        # 3. Combine masks and targets
-        #########################################
-        mask = torch.cat([t_mask, h_mask], dim=0)
-        target = torch.cat([pos_t_index, pos_h_index], dim=0)
-
-        return mask, target
-
-
-        
-    def predict_and_target(self, batch, all_loss=None, metric=None):
-        return self.predict(batch, all_loss, metric), self.target(batch)
-
-    def preprocess(self, train_set, valid_set, test_set):
-        if isinstance(train_set, torch_data.Subset):
-            dataset = train_set.dataset
-        else:
-            dataset = train_set
-        self.num_entity = dataset.num_entity
-        self.num_relation = dataset.num_relation
-        num_edges = dataset.graph.edge_index.size(1)
-        fact_mask = torch.ones(num_edges, dtype=torch.bool)  # start with all True
-        fact_mask[valid_set.indices] = False
-        fact_mask[test_set.indices] = False
-        self.graph = dataset.graph
-        self.fact_graph = edge_mask(dataset.graph, fact_mask)
-        return train_set, valid_set, test_set
-
-    def id2tokenid(self, id, split='test', entity=True):
-        if entity:
-            #id2rawname = np.array(self.dataset.kgdata.entity_vocab)
-            id2rawname = np.array(self.dataset.kgdata.transductive_vocab)
-            # We use the transductive vocab for both train and test
-
-        else:
-            id2rawname = np.array(self.dataset.kgdata.relation_vocab)
-        rawname = id2rawname[id.cpu()]
-        tokenid = np.stack([self.dataset.rawname2tokenid.loc[n]
-                           for n in rawname])
-        return torch.tensor(tokenid, dtype=id.dtype, device=id.device)
-
-    def get_graph(self, batch):
-        return self.fact_graph
-    
-    def get_eval_graph(self, batch):
-        return self.graph
-
-    @torch.no_grad()
-    def _strict_negative(self, pos_h_index, pos_t_index, pos_r_index):
-        """
-        Generate strict negative samples for heads and tails.
-        Returns tensor of shape (batch_size, num_negative) for tails and heads.
-        """
-        batch_size = pos_h_index.size(0)
-        device = pos_h_index.device
-        num_entity = self.num_entity
-        num_negative = self.num_negative
-
-        ###########################################
-        # Tail negatives
-        ###########################################
-        t_neg = []
-        for i in range(batch_size):
-            candidates = torch.arange(num_entity, device=device)
-            mask = torch.ones(num_entity, dtype=torch.bool, device=device)
-            mask[pos_t_index[i]] = 0  # exclude positive tail
-            candidates = candidates[mask]
-
-            if candidates.size(0) <= num_negative:
-                sampled = candidates
-            else:
-                perm = torch.randperm(candidates.size(0), device=device)[:num_negative]
-                sampled = candidates[perm]
-            t_neg.append(sampled)
-        neg_t_index = torch.stack(t_neg, dim=0)  # (batch_size, num_negative)
-
-        ###########################################
-        # Head negatives
-        ###########################################
-        h_neg = []
-        for i in range(batch_size):
-            candidates = torch.arange(num_entity, device=device)
-            mask = torch.ones(num_entity, dtype=torch.bool, device=device)
-            mask[pos_h_index[i]] = 0
-            candidates = candidates[mask]
-
-            if candidates.size(0) <= num_negative:
-                sampled = candidates
-            else:
-                perm = torch.randperm(candidates.size(0), device=device)[:num_negative]
-                sampled = candidates[perm]
-            h_neg.append(sampled)
-        neg_h_index = torch.stack(h_neg, dim=0)  # (batch_size, num_negative)
-
-        ###########################################
-        # Concatenate heads and tails if needed
-        ###########################################
-        # Optional: depends on your model usage
-        neg_index = torch.cat([neg_t_index, neg_h_index], dim=0)
-
-        return neg_index
-
-
-
-
-
-class KGL4IndKGC(KGL4KGC):
-
-    def preprocess(self, train_set, valid_set, test_set):
-        if isinstance(train_set, torch_data.Subset):
-            dataset = train_set.dataset
-        else:
-            dataset = train_set
-        self.num_entity = dataset.num_entity
-        self.num_relation = dataset.num_relation
-
-        self.graph = dataset.graph
-        self.fact_graph = dataset.fact_graph
-        self.inductive_graph = dataset.inductive_graph
-        self.inductive_fact_graph = dataset.inductive_fact_graph
-
-    def id2tokenid(self, id, split='test', entity=True):
-        if entity:
-            if split == 'test':
-                id2rawname = np.array(self.dataset.kgdata.inductive_vocab)
-            else:
-                id2rawname = np.array(self.dataset.kgdata.transductive_vocab)
-        else:
-            id2rawname = np.array(self.dataset.kgdata.relation_vocab)
-            
-        rawname = id2rawname[id.cpu()]
-        tokenid = np.stack([self.dataset.rawname2tokenid.loc[n]
-                           for n in rawname])
-        return torch.tensor(tokenid, dtype=id.dtype, device=id.device)
-
-    def get_graph(self, batch):
-        return self.inductive_fact_graph if batch.split == "test" else self.fact_graph
-
-    def get_eval_graph(self, batch):
-        return self.inductive_graph if batch.split == "test" else self.graph
-
+    # Required for HuggingFace Trainer to save the model correctly
+    def save_pretrained(self, save_directory):
+        self.llm.save_pretrained(save_directory)
+        # We should also save the retriever weights manually or ensure they are part of the state_dict
+        torch.save(self.context_retriever.state_dict(), f"{save_directory}/context_retriever.pt")
+        torch.save(self.score_retriever.state_dict(), f"{save_directory}/score_retriever.pt")

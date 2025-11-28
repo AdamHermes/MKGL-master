@@ -1,131 +1,110 @@
-import os, sys, logging, argparse, yaml, easydict
-import os
-os.environ["MPLBACKEND"] = "Agg"   # MUST be before importing matplotlib or torchdrug
-
-import matplotlib
-matplotlib.use("Agg")              # double-force safe backend
-import numpy as np
-import torch
-
-from transformers import (
-    TrainingArguments,
-    Trainer,
-)
-from transformers.trainer import Trainer
-from peft import (
-    LoraConfig,
-    get_peft_model,
-)
-from accelerate import Accelerator
-
+import argparse
 import yaml
+import easydict
+import torch
+import numpy as np
+from torch_geometric.utils import degree
+from transformers import (
+    AutoTokenizer, 
+    AutoModelForCausalLM, 
+    TrainingArguments, 
+    Trainer,
+    DataCollatorForTokenClassification
+)
+from peft import LoraConfig, get_peft_model, TaskType
 
+# New Imports
+from preprocess_new import InductiveKGCDataset, KGCDataset
+from new_retriever import ContextRetriever
+from new_score_retriever import ScoreRetriever
+from LLM import MKGL
 
-from llm import *
-from collector import *
-from preprocess_new import *
+def compute_degree_histogram(edge_index, num_nodes):
+    row, col = edge_index
+    deg = degree(col, num_nodes, dtype=torch.long)
+    return torch.bincount(deg, minlength=1)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='data preprocessing')
-    parser.add_argument("--config", "-c", type=str,
-                        default='config/fb15k237.yaml')
-    parser.add_argument("--version", "-v", type=str,
-                        default='')
-    parser.add_argument("--seed", "-s", type=str,
-                        default=42)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", "-c", type=str, default='config/fb15k237.yaml')
     args = parser.parse_args()
-    accelerator = Accelerator()
-    rank = accelerator.process_index
+
+    # Load Config
     with open(args.config, "r") as f:
         cfg = easydict.EasyDict(yaml.safe_load(f))
-        if args.version:
-            cfg.dataset.version = args.version
-    torch.manual_seed(args.seed + rank)
 
+    # Load Data
     config_name = args.config.split('/')[-1].split('.')[0]
-    if hasattr(cfg.dataset, 'version'):
-        config_name += '_' + cfg.dataset.version
-    args.config_name = config_name
-    cfg.trainer.output_dir += config_name
+    if hasattr(cfg.dataset, 'version'): config_name += '_' + cfg.dataset.version
+    file_path = f'data/preprocessed/{config_name}.pkl'
     
-    
-    if rank == 0:
-        print("Config file: %s" % args.config)
-        print(yaml.dump(cfg, sort_keys=False))
-    
-
-    saved_dir = 'data/preprocessed/'
-    file_path = saved_dir+args.config_name+'.pkl'
-    if 'ind' in args.config_name:
+    if 'ind' in config_name:
         dataset = InductiveKGCDataset.load(file_path)
+        train_graph = dataset.kgdata.inductive_fact_graph 
     else:
         dataset = KGCDataset.load(file_path)
+        train_graph = dataset.kgdata.graph
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_graph = train_graph.to(device)
+    deg_hist = compute_degree_histogram(train_graph.edge_index, train_graph.num_nodes).to(device)
+
+    # Load Base LLM
     tokenizer = dataset.tokenizer
-    cfg.context_retriever.kg_encoder.num_relation = int(
-        dataset.kgdata.num_relation)
-    cfg.score_retriever.kg_encoder.num_relation = int(
-        dataset.kgdata.num_relation)
+    base_model = AutoModelForCausalLM.from_pretrained(
+        cfg.tokenizer.pretrained_model_name_or_path,
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+    base_model.resize_token_embeddings(len(tokenizer))
     
-    #torch.nn.Module = torch.nn._Module
-    config = MKGLConfig.from_pretrained(**cfg.mkglconfig)
-    model = MKGL.from_pretrained(
-        **cfg.mkgl, device_map={"": Accelerator().process_index}, config=config)
+    # PEFT
+    peft_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=cfg.loraconfig.r,
+        lora_alpha=cfg.loraconfig.lora_alpha,
+        target_modules=cfg.loraconfig.target_modules
+    )
+    model = get_peft_model(base_model, peft_config)
 
-    lora_config = LoraConfig(**cfg.loraconfig)
-    model = get_peft_model(model, lora_config)
+    # Initialize Retrievers
+    # Construct KGL token map (KG ID -> Token IDs)
+    text_token_list = dataset.vocab_df['text_token_ids'].tolist()
+    max_len = cfg.kgl_token_length
+    padded = np.zeros((len(text_token_list), max_len), dtype=np.int64)
+    for i, t in enumerate(text_token_list):
+        trunc = t[:max_len]
+        padded[i, :len(trunc)] = trunc
+    kgl2token_ids = torch.tensor(padded, device=device)
 
-    kgl2token = torch.tensor(np.stack(dataset.vocab_df.text_token_ids)[:, :cfg.kgl_token_length])     
-    model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg) 
+    ctx_retriever = ContextRetriever(
+        cfg.context_retriever, model.get_input_embeddings(), kgl2token_ids, deg_hist
+    ).to(device)
     
-    if rank == 0:
-        print(model.print_trainable_parameters())
-        print(model)
+    score_retriever = ScoreRetriever(
+        cfg.score_retriever, ctx_retriever, deg_hist
+    ).to(device)
 
-    
-    if 'ind' in args.config:
-        task = KGL4IndKGC(cfg.mkgl4kgc, llmodel=model, dataset=dataset)
-    else:
-        task = KGL4KGC(cfg.mkgl4kgc, llmodel=model, dataset=dataset)
-    
+    # Initialize Main MKGL Module
+    orig_vocab_size = tokenizer.vocab_size - len(tokenizer.get_added_vocab())
+    mkgl_model = MKGL(model, ctx_retriever, score_retriever, train_graph, orig_vocab_size)
 
-    data_loader = MKGLDataCollector(dataset)
-    
+    # Trainer
     training_args = TrainingArguments(**cfg.trainer)
-    if rank == 0:
-        print(training_args)
-
-
-    def compute_metrics(predictions):
-        ranking = predictions[0].astype(float)
-        metric = ("mr", "mrr", "hits@1", "hits@3", "hits@10")
-        results = {}
-        for _metric in metric:
-            if _metric == "mr":
-                score = ranking.mean()
-            elif _metric == "mrr":
-                score = (1 / ranking).mean()
-            elif _metric.startswith("hits@"):
-                threshold = int(_metric[5:])
-                score = (ranking <= threshold).mean()
-            else:
-                raise ValueError("Unknown metric `%s`" % _metric)
-
-            results[_metric] = score
-        if rank == 0:
-            print(results)
-        return results
-
-    removed_columns = ['h_raw', 't_raw', 'r_raw', 'h_fine', 't_fine', 'r_fine', 'inv_r_fine']
+    
+    # Use TokenClassification collator to handle padding of labels if necessary
+    # Or standard collator if inputs are uniform
+    collator = DataCollatorForTokenClassification(tokenizer) 
 
     trainer = Trainer(
-        model=task,
+        model=mkgl_model,
         args=training_args,
-        eval_dataset=dataset.test_data.remove_columns(
-            removed_columns),  
-        train_dataset=dataset.train_data.remove_columns(removed_columns),
-        data_collator=data_loader,
-        compute_metrics=compute_metrics
+        train_dataset=dataset.train_data,
+        eval_dataset=dataset.valid_data,
+        data_collator=collator
     )
-    trainer.evaluate()
+
     trainer.train()
 
+if __name__ == "__main__":
+    main()
