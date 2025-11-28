@@ -274,7 +274,10 @@ class ConditionedGAT(nn.Module):
         # Set up graph attributes
         graph_dict['query'] = rel_embeds
         graph_dict['node2graph'] = self.create_node2graph(
-            graph_dict['num_nodes'], batch_size)
+            graph_dict['num_nodes'], 
+            batch_size, 
+            device=input_embeds.device  # <--- Pass device here
+        )
         
         hidden = input_embeds.clone()
         score = init_score.clone()
@@ -343,7 +346,8 @@ class ConditionedGAT(nn.Module):
     def create_batched_graph(self, graph, h_index, t_index, batch_size):
         """Create batched graph by repeating base graph."""
         edge_index = graph.edge_index
-        num_nodes = graph.num_node
+        max_idx = edge_index.max().item() + 1
+        num_nodes = max(getattr(graph, 'num_node', 0), getattr(graph, 'num_nodes', 0), max_idx)
         
         # Batch edge indices
         batched_edges = []
@@ -364,10 +368,10 @@ class ConditionedGAT(nn.Module):
         
         return graph_dict, h_index_batch, t_index_batch
     
-    def create_node2graph(self, num_nodes, batch_size):
-        """Create node to graph mapping."""
+    def create_node2graph(self, num_nodes, batch_size, device):
         nodes_per_graph = num_nodes // batch_size
-        node2graph = torch.arange(batch_size, device='cuda' if torch.cuda.is_available() else 'cpu')
+        # Use the specific device passed in
+        node2graph = torch.arange(batch_size, device=device)
         node2graph = node2graph.repeat_interleave(nodes_per_graph)
         return node2graph
     
@@ -375,7 +379,9 @@ class ConditionedGAT(nn.Module):
         """Make graph undirected."""
         edge_index = graph.edge_index
         inverse_edges = torch.stack([edge_index[1], edge_index[0]], dim=0)
-        graph.edge_index = torch.cat([edge_index, inverse_edges], dim=1)
+        new_edge_index = torch.cat([edge_index, inverse_edges], dim=1)
+
+        graph.edge_index = new_edge_index
         return graph
     
     def remove_easy_edges(self, graph, h_index, r_index, t_index):
