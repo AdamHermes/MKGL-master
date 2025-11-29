@@ -383,7 +383,7 @@ class ConditionedGAT(nn.Module):
         rel_embeds_expanded = rel_embeds.to(device).repeat_interleave(repeat_count, dim=0)
         print("rel_embeds.shape:", rel_embeds.shape)
         print("rel_embeds_expanded.shape:", rel_embeds_expanded.shape)
-        print("head_index.max():", head_index.max())
+        #print("head_index.max():", head_index.max())
         assert head_index.max() < rel_embeds_expanded.size(0)
         # Compute score only for head nodes (ensure same device)
         score[head_index] = self.score_fn(
