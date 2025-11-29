@@ -76,67 +76,19 @@ class BasePNARetriever(nn.Module):
         return self.retrieve_text(token_ids)
 
 
+
 class ContextRetriever(BasePNARetriever):
-    """
-    Context retriever that can optionally use GAT for graph-based context.
-    """
-    
+
     def __init__(self, config, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         self.up_scaling = nn.Linear(
-            self.config.r, 
-            self.config.llm_hidden_dim, 
-            bias=False, 
-            dtype=torch.float
-        )
-        
-        # Optional: Initialize GAT if kg_encoder is specified
-        if hasattr(config, 'kg_encoder'):
-            cfg_kg = config.kg_encoder
-            base_layer_config = {
-                'input_dim': cfg_kg.base_layer.input_dim,
-                'output_dim': cfg_kg.base_layer.output_dim,
-                'query_input_dim': cfg_kg.base_layer.query_input_dim,
-                'layer_norm': cfg_kg.base_layer.layer_norm,
-                'dependent': cfg_kg.base_layer.dependent,
-                'num_heads': getattr(cfg_kg.base_layer, 'num_heads', 4),
-                'dropout': getattr(cfg_kg.base_layer, 'dropout', 0.1),
-                'aggregate_func': cfg_kg.base_layer.aggregate_func,
-            }
-            
-            self.kg_retriever = GAT(
-                base_layer=base_layer_config,
-                num_layer=cfg_kg.num_layer,
-                num_mlp_layer=getattr(cfg_kg, 'num_mlp_layer', 2),
-                remove_one_hop=cfg_kg.remove_one_hop
-            )
-        else:
-            self.kg_retriever = None
+                self.config.r, self.config.llm_hidden_dim, bias=False, dtype=torch.float)
 
-    def forward(self, kgl_ids, graph=None, all_index=None, all_kgl_index=None):
-        """
-        Forward pass for context retrieval.
-        
-        Args:
-            kgl_ids: KG token IDs
-            graph: Optional graph structure for GAT
-            all_index: Optional entity indices
-            all_kgl_index: Optional KG lookup indices
-            
-        Returns:
-            context: Context embeddings [batch_size, llm_hidden_dim]
-        """
+    def forward(self, kgl_ids, graph, all_index, all_kgl_index):
         text_embs = super().forward(kgl_ids)
-        
-        # If graph is provided and we have a kg_retriever, use it
-        if graph is not None and self.kg_retriever is not None:
-            # Apply GAT to enhance embeddings with graph structure
-            text_embs = self.kg_retriever(graph, text_embs)
-        
         context = self.up_scaling(text_embs)
         return context
-
-
+    
 class ScoreRetriever(BasePNARetriever):
     """
     Score retriever using GAT for knowledge graph reasoning.
