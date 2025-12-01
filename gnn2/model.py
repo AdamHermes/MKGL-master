@@ -99,7 +99,7 @@ def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0)
 #############################################
 
 class PNA(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, num_layers=6):
+    def __init__(self, in_dim, out_dim,num_relations, num_layers=6,deg=1.0):
         self.node_emb = Embedding(21, 75)
         self.edge_emb = Embedding(4, 50)
 
@@ -146,7 +146,7 @@ class ConditionedPNA(PNA):
         node_ratio=0.1,
         degree_ratio=1.0,
     ):
-        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers, avg_deg=1.0)
+        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers, deg=1.0)
 
         self.node_ratio = node_ratio
         self.degree_ratio = degree_ratio
