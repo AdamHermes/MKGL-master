@@ -44,8 +44,9 @@ class InductiveKnowledgeGraphDataset(Dataset):
             
         tensor_triplets = torch.tensor(triplets, dtype=torch.long)
         edge_index = torch.stack([tensor_triplets[:, 0], tensor_triplets[:, 1]], dim=0)
-        edge_type = tensor_triplets[:, 2]
-        return Data(edge_index=edge_index, edge_type=edge_type, num_nodes=num_nodes)
+        edge_attr = tensor_triplets[:, 2]
+        x = torch.arange(num_nodes, dtype=torch.long)
+        return Data(x =x,edge_index=edge_index, edge_attr=edge_attr, num_nodes=num_nodes)
 
     def _finalize_vocab(self, inv_vocab):
         sorted_items = sorted(inv_vocab.items(), key=lambda x: x[1])
