@@ -1,336 +1,352 @@
 import torch
-from torch import nn
-from torch.nn import functional as F
-from torch_scatter import scatter_add
-from torch_geometric.nn import PNAConv
-from torch_geometric.utils import to_undirected, degree
-from torch.nn import Embedding, Linear, ModuleList, ReLU, Sequential
-from torch_geometric.nn import BatchNorm, global_add_pool
-
-#############################################
-# Helper Functions
-#############################################
-
-def repeat_graph(x: torch.Tensor, edge_index: torch.Tensor, batch_size: int):
-    """
-    Repeat node features x (N, D) and edge_index (2, E) batch_size times.
-    Returns:
-      x_rep: (B*N, D)
-      edge_index_rep: (2, B*E)
-      node_batch: (B*N,) node->graph mapping (0..B-1)
-    """
-    device = x.device
-    N = x.size(0)
-    E = edge_index.size(1)
-
-    x_rep = x.repeat(batch_size, 1)  # (B*N, D)
-
-    offsets = (torch.arange(batch_size, device=device, dtype=edge_index.dtype) * N).unsqueeze(1)
-    edge_index_rep = edge_index.unsqueeze(0) + offsets.unsqueeze(-1)
-    edge_index_rep = edge_index_rep.view(2, -1).to(edge_index.dtype)
-
-    node_batch = torch.arange(batch_size, device=device).repeat_interleave(N)
-
-    return x_rep, edge_index_rep, node_batch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import add_self_loops, remove_self_loops, degree, to_undirected
+from torch_scatter import scatter_add, scatter_max
+import numpy as np
 
 
-def neighbors(edge_index, nodes):
-    """
-    Returns (edge_idx, neighbor_nodes)
-    """
-    row, col = edge_index
-    mask = torch.isin(row, nodes)
-    out_edges = torch.nonzero(mask).squeeze(-1)
-    out_nodes = col[mask]
-    return out_edges, out_nodes
+class SimpleMLPLayer(nn.Module):
+    """Simple MLP layer for graph neural networks"""
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+    
+    def forward(self, x):
+        return self.linear(x)
 
 
-def select_edges_pyg(edge_index, score, batch, node_ratio=0.1, degree_ratio=1.0):
-    """
-    Per-graph selection of edges based on node scores.
-    """
-    device = edge_index.device
-    unique_batches = torch.unique(batch)
-    selected = []
+class MLP(nn.Module):
+    """Multi-layer perceptron"""
+    def __init__(self, input_dim, hidden_dims):
+        super().__init__()
+        dims = [input_dim] + hidden_dims
+        self.layers = nn.ModuleList()
+        for i in range(len(dims) - 1):
+            self.layers.append(nn.Linear(dims[i], dims[i + 1]))
+    
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if i < len(self.layers) - 1:
+                x = F.relu(x)
+        return x
 
-    for b in unique_batches:
-        mask_nodes = (batch == b)
-        node_ids = torch.nonzero(mask_nodes, as_tuple=True)[0]
-        if node_ids.numel() == 0:
-            continue
-
-        scores_b = score[node_ids]
-        k = max(1, int(node_ratio * node_ids.numel()))
-        if scores_b.numel() <= k:
-            top_node_idx = torch.arange(scores_b.numel(), device=device)
-        else:
-            _, top_node_idx = torch.topk(scores_b, k)
-
-        selected_nodes = node_ids[top_node_idx]
-
-        edge_idxs, cols = neighbors(edge_index, selected_nodes)
-        if edge_idxs.numel() == 0:
-            continue
-
-        e = max(1, int(len(edge_idxs) * degree_ratio))
-        target_scores = score[cols]
-        if target_scores.numel() <= e:
-            top_e_idx = torch.arange(target_scores.numel(), device=device)
-        else:
-            _, top_e_idx = torch.topk(target_scores, e)
-
-        selected.append(edge_idxs[top_e_idx])
-
-    if len(selected) == 0:
-        return torch.empty(0, dtype=torch.long, device=device)
-    return torch.cat(selected)
-
-
-#############################################
-# PNA Backbone (PyG only)
-#############################################
 
 class PNA(nn.Module):
-    def __init__(self, in_dim, out_dim, num_relations, num_layers=3):
-        super().__init__()
-        aggr = ['mean', 'max', 'min', 'std']
-        scalers = ['identity', 'amplification', 'attenuation']
-
-        self.layers = ModuleList()
-        deg_placeholder = torch.ones(1)
+    """Principal Neighborhood Aggregation without TorchDrug"""
+    
+    def __init__(self, base_layer, num_layer, num_mlp_layer=2, remove_one_hop=False):
+        super(PNA, self).__init__()
         
-        for _ in range(num_layers):
-            self.layers.append(
-                PNAConv(
-                    in_dim,
-                    out_dim,
-                    aggregators=aggr,
-                    scalers=scalers,
-                    deg=deg_placeholder
-                )
-            )
-        self.short_cut = True
+        self.num_layer = num_layer
+        self.num_mlp_layer = num_mlp_layer
+        self.remove_one_hop = remove_one_hop
+        self.layers = nn.ModuleList()
+        
+        # Store layer configuration
+        self.input_dim = base_layer.in_dim if hasattr(base_layer, 'in_dim') else base_layer.input_dim
+        self.output_dim = base_layer.out_dim if hasattr(base_layer, 'out_dim') else base_layer.output_dim
+        self.num_relation = base_layer.num_relation if hasattr(base_layer, 'num_relation') else 1
+        
+        # Create multiple layers
+        for i in range(num_layer):
+            self.layers.append(self._clone_layer(base_layer))
+        
+        feature_dim = self.output_dim + self.input_dim
+        self.mlp = MLP(feature_dim, [feature_dim] * (num_mlp_layer - 1) + [1])
+    
+    def _clone_layer(self, layer):
+        """Clone a layer with the same configuration"""
+        layer_class = layer.__class__
+        return layer_class(
+            in_dim=layer.in_dim if hasattr(layer, 'in_dim') else layer.input_dim,
+            out_dim=layer.out_dim if hasattr(layer, 'out_dim') else layer.output_dim,
+            num_relation=layer.num_relation if hasattr(layer, 'num_relation') else 1
+        )
+    
+    def aggregate(self, graph, input_embeds):
+        """Aggregate embeddings through layers"""
+        layer_input = input_embeds
+        
+        for layer in self.layers:
+            hidden = layer(graph, layer_input)
+            if hasattr(self, 'short_cut') and self.short_cut:
+                hidden = hidden + layer_input
+            layer_input = hidden
+        
+        return hidden
+    
+    def init_input_embeds(self, graph, input_embeds, input_index):
+        """Initialize input embeddings for all nodes"""
+        full_embeds = torch.zeros(
+            graph.num_nodes, 
+            input_embeds.shape[-1], 
+            device=input_embeds.device,
+            dtype=input_embeds.dtype
+        )
+        full_embeds[input_index] = input_embeds
+        return full_embeds
+    
+    def forward(self, graph, input_embeds, input_index):
+        """
+        Forward pass
+        
+        Args:
+            graph: PyTorch Geometric Data object with (x, edge_index, edge_attr, num_nodes)
+            input_embeds: Embeddings for input nodes
+            input_index: Indices of input nodes
+        
+        Returns:
+            output: Aggregated embeddings for all nodes
+        """
+        # Convert to undirected graph
+        edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr)
+        graph.edge_index = edge_index
+        if edge_attr is not None:
+            graph.edge_attr = edge_attr
+        
+        # Initialize embeddings for all nodes
+        full_embeds = self.init_input_embeds(graph, input_embeds, input_index)
+        
+        # Aggregate through layers
+        output = self.aggregate(graph, full_embeds)
+        
+        return output
 
-    def forward(self, x, edge_index):
-        h = x
-        for conv in self.layers:
-            h_new = conv(h, edge_index)
-            if self.short_cut:
-                h_new = h_new + h
-            h = h_new
-        return h
-
-
-#############################################
-# ConditionedPNA (PyG-based, TorchDrug-free)
-#############################################
 
 class ConditionedPNA(PNA):
-    def __init__(
-        self,
-        in_dim,
-        out_dim,
-        num_relations,
-        num_layers=3,
-        node_ratio=0.1,
-        degree_ratio=1.0,
-    ):
-        super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers)
-
+    """Conditioned PNA for knowledge graph completion without TorchDrug"""
+    
+    def __init__(self, base_layer, num_layer, num_mlp_layer=2, node_ratio=0.1, 
+                 degree_ratio=1, test_node_ratio=None, test_degree_ratio=None,
+                 break_tie=False, **kwargs):
+        
+        super().__init__(base_layer, num_layer, num_mlp_layer=num_mlp_layer, **kwargs)
+        
         self.node_ratio = node_ratio
         self.degree_ratio = degree_ratio
-        self.num_relations = num_relations
-
-        self.rel_embedding = nn.Embedding(num_relations * 2, in_dim)
-
-        # scoring MLP
-        feature_dim = in_dim + out_dim
-        self.linear = nn.Linear(feature_dim, out_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(out_dim, out_dim),
-            nn.ReLU(),
-            nn.Linear(out_dim, 1)
-        )
-
-    ###########################################
-    # scoring function
-    ###########################################
-    def score(self, hidden, rel):
-        """
-        Compute per-node scores based on hidden state and relation embedding.
-        Args:
-            hidden: (num_nodes, hidden_dim)
-            rel: (num_nodes, rel_dim)
-        Returns:
-            scores: (num_nodes,)
-        """
-        h = torch.cat([hidden, rel], dim=-1)
-        heur = self.linear(h)
-        x = heur * hidden
-        return self.mlp(x).squeeze(-1)
-
-    ###########################################
-    # negative sample swapping
-    ###########################################
-    def negative_sample_to_tail(self, h, t, r):
-        """
-        Swap heads and tails for negative samples.
-        Assumes first column is positive sample, rest are negatives.
-        """
-        is_t_neg = (h == h[:, [0]]).all(dim=-1, keepdim=True)
-        new_h = torch.where(is_t_neg, h, t)
-        new_t = torch.where(is_t_neg, t, h)
-        new_r = torch.where(is_t_neg, r, r + self.num_relations)
-        return new_h, new_t, new_r
-
-    ###########################################
-    # initialize input embeddings
-    ###########################################
-    def init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch):
-        """
-        Initialize embeddings for the repeated graph.
-        Place head and tail embeddings at their positions.
-        """
-        x = x.clone()
-        x[t_idx] = t_emb.to(x.dtype)
-        x[h_idx] = h_emb.to(x.dtype)
-
-        # Initialize scores: 0 for all nodes except heads
-        dummy_hidden = torch.zeros_like(rel_emb)
-        background_score = self.score(dummy_hidden, rel_emb)
-        score = background_score[batch]
-        score = score.to(torch.float32)
+        self.test_node_ratio = test_node_ratio or node_ratio
+        self.test_degree_ratio = test_degree_ratio or degree_ratio
+        self.break_tie = break_tie
         
-        calculated_score = self.score(h_emb, rel_emb)
-        score[h_idx] = calculated_score.to(dtype=torch.float32)
-
-        return x, score
-
-    ###########################################
-    # aggregate via GNN layers
-    ###########################################
-    def aggregate_pyg(self, x_rep, e_rep, batch_rep, rel_embeds, input_embeds, init_score):
-        """
-        Run GNN aggregation with edge selection based on scores.
-        Args:
-            x_rep: (B*N, dim) repeated node features
-            e_rep: (2, B*E) repeated edge indices
-            batch_rep: (B*N,) node->graph mapping
-            rel_embeds: (batch_size, rel_dim) relation embeddings
-            input_embeds: (B*N, dim) initialized embeddings
-            init_score: (B*N,) initial scores
-        Returns:
-            score: (B*N,) final per-node scores
-        """
-        device = x_rep.device
-        num_nodes_rep = x_rep.size(0)
-
-        boundary = input_embeds.clone()
-        score = init_score.clone()
-        hidden = boundary.clone()
-
-        # Relation embedding per node (expand batch dimension)
-        rel_per_node = rel_embeds[batch_rep]  # (B*N, rel_dim)
-
-        # Iterate through GNN layers
-        for i, layer in enumerate(self.layers):
-            # Select edges based on current scores
-            sel_edge_idx = select_edges_pyg(e_rep, score, batch_rep, 
-                                           self.node_ratio, self.degree_ratio)
-
-            if sel_edge_idx.numel() > 0:
-                e_sub = e_rep[:, sel_edge_idx]
-            else:
-                e_sub = e_rep
-
-            # GNN forward pass
-            new_hidden = layer(hidden, e_sub)
-
-            # Update hidden states (accumulate)
-            if e_sub.size(1) > 0:
-                out_deg = torch.zeros(num_nodes_rep, device=device, dtype=torch.float32)
-                out_deg.scatter_add_(0, e_sub[0], torch.ones(e_sub.size(1), device=device))
-                node_out = torch.nonzero(out_deg > 0, as_tuple=True)[0]
-                hidden[node_out] = hidden[node_out] + new_hidden[node_out]
-            else:
-                hidden = hidden + new_hidden
-
-            # Recompute scores
-            score = self.score(hidden, rel_per_node).type(score.dtype)
-
-        return score
-
-    ###########################################
-    # main forward pass
-    ###########################################
-    def forward(self, h_index, r_index, t_index,
-                hidden_states, rel_hidden_states,
+        feature_dim = self.output_dim + self.input_dim
+        self.rel_embedding = nn.Embedding(self.num_relation * 2, self.input_dim)
+        self.linear = nn.Linear(feature_dim, self.output_dim)
+        self.mlp = MLP(self.output_dim, [feature_dim] * (num_mlp_layer - 1) + [1])
+    
+    def forward(self, h_index, r_index, t_index, hidden_states, rel_hidden_states, 
                 graph, score_text_embs, all_index):
         """
-        Forward pass for link prediction scoring.
+        Forward pass for link prediction
         
         Args:
-            h_index: (batch_size, k) head indices (k = 1 + num_negative)
-            r_index: (batch_size, k) relation indices
-            t_index: (batch_size, k) tail indices
-            hidden_states: (batch_size, in_dim) head embeddings from LLM
-            rel_hidden_states: unused
-            graph: PyG Data object with .x, .edge_index, .num_nodes
-            score_text_embs: (num_nodes, in_dim) node features
-            all_index: node indices (not used)
+            h_index: Head entity indices [batch_size, num_neg+1]
+            r_index: Relation indices [batch_size, num_neg+1]
+            t_index: Tail entity indices [batch_size, num_neg+1]
+            hidden_states: Node embeddings [num_nodes, hidden_dim]
+            rel_hidden_states: Relation embeddings [num_relations, hidden_dim]
+            graph: PyTorch Geometric Data object
+            score_text_embs: Text embeddings for entities
+            all_index: All entity indices
         
         Returns:
-            final: (batch_size, k) predicted scores
+            score: Prediction scores [batch_size, num_neg+1]
         """
+        if self.training:
+            graph = self.remove_easy_edges(graph, h_index, t_index, r_index)
         
-        # 1) Swap negatives to tail
+        # Convert to undirected
+        edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr)
+        graph.edge_index = edge_index
+        if edge_attr is not None:
+            graph.edge_attr = edge_attr
+        
+        # Resample negatives to tail
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
-
-        batch_size = h_index.size(0)
-        device = score_text_embs.device
-        num_nodes = score_text_embs.size(0)
-
-        # 2) Extract original indices before offsetting
-        head_orig_idx = h_index[:, 0].clone()
-        tail_orig_idx = t_index[:, 0].clone()
-
-        # 3) Build repeated graph tensors
-        x_rep, e_rep, batch_rep = repeat_graph(graph.x, graph.edge_index, batch_size)
-
-        # 4) Offset indices to repeated graph indexing
-        offsets = (torch.arange(batch_size, device=device, dtype=torch.long) * num_nodes).unsqueeze(1)
-        h_index = h_index + offsets.to(h_index.dtype).to(device)
-        t_index = t_index + offsets.to(t_index.dtype).to(device)
-
-        # 5) Get relation embeddings
-        rel_embeds = self.rel_embedding(r_index[:, 0]).to(hidden_states.dtype)  # (batch_size, in_dim)
-
-        # 6) Prepare head and tail embeddings
-        head_embs = hidden_states.to(x_rep.dtype)
-        tail_embs = score_text_embs[tail_orig_idx].to(x_rep.dtype)
-
-        # 7) Initialize input embeddings
+        
+        # Handle batch processing
+        batch_size = len(h_index)
+        graph = self._repeat_graph(graph, batch_size)
+        
+        # Compute offsets for batched indices
+        num_nodes_cumsum = torch.cat([torch.tensor([0], device=graph.num_nodes_list[0].device),
+                                      torch.cumsum(torch.tensor(graph.num_nodes_list, 
+                                                  device=h_index.device), dim=0)])
+        offset = num_nodes_cumsum[:-1]
+        
+        h_index = h_index + offset.unsqueeze(-1).to(h_index.device)
+        t_index = t_index + offset.unsqueeze(-1).to(t_index.device)
+        
+        assert (h_index[:, [0]] == h_index).all()
+        assert (r_index[:, [0]] == r_index).all()
+        
+        # Get relation embeddings
+        rel_embeds = self.rel_embedding(r_index[:, 0])
+        rel_embeds = rel_embeds.type(hidden_states.dtype)
+        
+        # Initialize embeddings
         input_embeds, init_score = self.init_input_embeds(
-            x_rep,
-            head_embs,
-            h_index[:, 0],
-            tail_embs,
-            t_index[:, 0],
-            rel_embeds.to(x_rep.dtype),
-            batch_rep
+            graph, hidden_states, h_index[:, 0], score_text_embs, all_index, rel_embeds
         )
-
-        # 8) Run GNN aggregation
-        score = self.aggregate_pyg(
-            x_rep=x_rep,
-            e_rep=e_rep,
-            batch_rep=batch_rep,
-            rel_embeds=rel_embeds,
-            input_embeds=input_embeds,
-            init_score=init_score
+        
+        # Aggregate
+        score = self.aggregate(graph, h_index[:, 0], r_index[:, 0], input_embeds, rel_embeds, init_score)
+        score = score[t_index]
+        
+        return score
+    
+    def _repeat_graph(self, graph, batch_size):
+        """Repeat graph structure for batch processing"""
+        edge_index_list = []
+        edge_attr_list = []
+        x_list = []
+        
+        for i in range(batch_size):
+            offset = i * graph.num_nodes
+            edge_index_list.append(graph.edge_index + offset)
+            if graph.edge_attr is not None:
+                edge_attr_list.append(graph.edge_attr)
+            x_list.append(graph.x)
+        
+        batched_edge_index = torch.cat(edge_index_list, dim=1)
+        batched_edge_attr = torch.cat(edge_attr_list, dim=0) if edge_attr_list else None
+        batched_x = torch.cat(x_list, dim=0)
+        
+        # Create new graph
+        batched_graph = graph.clone()
+        batched_graph.edge_index = batched_edge_index
+        if batched_edge_attr is not None:
+            batched_graph.edge_attr = batched_edge_attr
+        batched_graph.x = batched_x
+        batched_graph.num_nodes_list = [graph.num_nodes] * batch_size
+        
+        return batched_graph
+    
+    def aggregate(self, graph, h_index, r_index, input_embeds, rel_embeds, init_score):
+        """Aggregate with edge selection"""
+        query = rel_embeds
+        boundary = input_embeds.clone()
+        hidden = boundary.clone()
+        score = init_score.clone()
+        
+        pna_degree_mean = (degree(graph.edge_index[1], num_nodes=graph.num_nodes) + 1).log().mean()
+        
+        for layer in self.layers:
+            # Select important edges
+            edge_index = self.select_edges(graph, score)
+            
+            # Create subgraph
+            subgraph = self._create_subgraph(graph, edge_index)
+            subgraph.pna_degree_mean = pna_degree_mean
+            
+            # Layer forward
+            layer_input = torch.sigmoid(score[edge_index[0]]).unsqueeze(-1) * hidden[edge_index[0]]
+            hidden_update = layer(subgraph, layer_input.type(torch.float32))
+            
+            # Update hidden states for nodes with outgoing edges
+            out_mask = degree(edge_index[0], num_nodes=graph.num_nodes) > 0
+            node_out = torch.where(out_mask)[0]
+            
+            hidden[node_out] = (hidden[node_out] + hidden_update).type(hidden.dtype)
+            
+            # Update scores
+            index_batch = torch.zeros(graph.num_nodes, dtype=torch.long, device=h_index.device)
+            score[node_out] = self.score(hidden[node_out], query[index_batch[node_out]]).type(score.dtype)
+        
+        return score
+    
+    def _create_subgraph(self, graph, edge_index):
+        """Create subgraph from edge indices"""
+        subgraph = graph.clone()
+        subgraph.edge_index = edge_index
+        return subgraph
+    
+    def init_input_embeds(self, graph, head_embeds, head_index, tail_embeds, tail_index, rel_embeds):
+        """Initialize input embeddings with head and tail"""
+        input_embeds = torch.zeros(
+            graph.num_nodes, 
+            rel_embeds.shape[1], 
+            device=rel_embeds.device, 
+            dtype=rel_embeds.dtype
         )
-
-        # 9) Index to get scores for requested tails
-        final = score[t_index[:, 0]]
-
-        return final
+        
+        input_embeds[tail_index] = tail_embeds.type(head_embeds.dtype)
+        input_embeds[head_index] = head_embeds
+        
+        # Initialize scores
+        score = torch.zeros(graph.num_nodes, device=rel_embeds.device, dtype=rel_embeds.dtype)
+        score[head_index] = self.score(head_embeds, rel_embeds)
+        
+        return input_embeds, score
+    
+    def score(self, hidden, rel_embeds):
+        """Compute score from hidden and relation embeddings"""
+        heuristic = self.linear(torch.cat([hidden, rel_embeds], dim=-1))
+        x = hidden * heuristic
+        score = self.mlp(x).squeeze(-1)
+        return score
+    
+    def select_edges(self, graph, score):
+        """Select important edges based on scores"""
+        node_ratio = self.node_ratio if self.training else self.test_node_ratio
+        degree_ratio = self.degree_ratio if self.training else self.test_degree_ratio
+        
+        num_nodes = graph.num_nodes
+        ks = max(1, int(node_ratio * num_nodes))
+        es = max(1, int(degree_ratio * ks * graph.num_edges / num_nodes))
+        
+        # Get nodes with highest scores
+        top_scores, top_nodes = torch.topk(score, min(ks, len(score)))
+        
+        # Get neighbors of top nodes
+        node_mask = torch.zeros(num_nodes, dtype=torch.bool, device=score.device)
+        node_mask[top_nodes] = True
+        
+        edge_mask = node_mask[graph.edge_index[0]]
+        selected_edges = graph.edge_index[:, edge_mask]
+        
+        # Further select top edges by score
+        if selected_edges.shape[1] > es:
+            edge_scores = score[selected_edges[1]]
+            _, top_edge_idx = torch.topk(edge_scores, min(es, edge_scores.shape[0]))
+            selected_edges = selected_edges[:, top_edge_idx]
+        
+        return selected_edges
+    
+    def remove_easy_edges(self, graph, h_index, t_index, r_index):
+        """Remove edges that are too easy (ground truth edges)"""
+        if self.remove_one_hop:
+            # Remove edges between h and t in both directions
+            h_ext = torch.cat([h_index[:, 0], t_index[:, 0]])
+            t_ext = torch.cat([t_index[:, 0], h_index[:, 0]])
+        else:
+            h_ext = h_index[:, 0]
+            t_ext = t_index[:, 0]
+            r_ext = r_index[:, 0]
+        
+        # Create mask for edges to remove
+        edge_mask = torch.ones(graph.num_edges, dtype=torch.bool, device=graph.edge_index.device)
+        
+        for h, t in zip(h_ext, t_ext):
+            # Find matching edges
+            matching = (graph.edge_index[0] == h) & (graph.edge_index[1] == t)
+            edge_mask[matching] = False
+        
+        # Filter graph
+        new_edge_index = graph.edge_index[:, edge_mask]
+        new_edge_attr = graph.edge_attr[edge_mask] if graph.edge_attr is not None else None
+        
+        graph.edge_index = new_edge_index
+        graph.edge_attr = new_edge_attr
+        
+        return graph
+    
+    def negative_sample_to_tail(self, h_index, t_index, r_index):
+        """Resample negatives to tail"""
+        is_t_neg = (h_index == h_index[:, [0]]).all(dim=-1, keepdim=True)
+        new_h_index = torch.where(is_t_neg, h_index, t_index)
+        new_t_index = torch.where(is_t_neg, t_index, h_index)
+        new_r_index = torch.where(is_t_neg, r_index, r_index + self.num_relation)
+        return new_h_index, new_t_index, new_r_index

@@ -292,7 +292,7 @@ class KGL4KGC(nn.Module):
         # Move graph tensors to the same device
         h_all = graph.edge_index[0].to(device)
         t_all = graph.edge_index[1].to(device)
-        r_all = graph.edge_type.to(device)  # make sure edge_type exists
+        r_all = graph.edge_attr.to(device)  # make sure edge_type exists
 
         #########################################
         # 1. Mask for tail prediction (t unknown)
