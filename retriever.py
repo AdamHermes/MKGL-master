@@ -118,14 +118,16 @@ class ScoreRetriever(BasePNARetriever):
         cfg_kg = config.kg_encoder
 
         self.kg_retriever = ConditionedPNA(
-            in_dim=cfg_kg.in_dim,
+            in_dim=self.config.r,
             out_dim=cfg_kg.out_dim,
             num_relations=cfg_kg.num_relations,
             num_layers=cfg_kg.get("num_layer", 6),
             node_ratio=cfg_kg.get("node_ratio", 0.1),
             degree_ratio=cfg_kg.get("degree_ratio", 1),
+            text_dim=cfg_kg.get("text_dim", 32),
+            feat_dim=cfg_kg.in_dim,
         )
-        #self.kg_retriever = ConditionedPNA(config.kg_encoder)
+        # self.kg_retriever = ConditionedPNA(config.kg_encoder)
         self.h_down_scaling = nn.Linear(
                 self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
         self.r_down_scaling = nn.Linear(

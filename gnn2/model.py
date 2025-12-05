@@ -166,18 +166,35 @@ class ConditionedPNA(PNA):
         num_layers=3,
         node_ratio=0.1,
         degree_ratio=1.0,
+        text_dim=32,
+        feat_dim=None # kích thước gốc của graph
     ):
         super().__init__(in_dim, out_dim, num_relations, num_layers=num_layers, avg_deg=1.0)
 
         self.node_ratio = node_ratio
         self.degree_ratio = degree_ratio
         self.num_relations = num_relations
-        # backbone GNN
 
+        self.text_dim = text_dim
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+
+        # Tạo một lớp Linear để nén dữ liệu xuống
+        if feat_dim is not None and feat_dim != in_dim:
+            print(f"[INIT] Creating feature projection: {feat_dim} -> {in_dim}")
+            self.feat_proj = nn.Linear(feat_dim, in_dim)
+        else:
+            print(f"[INIT] No feature projection created. feat_dim={feat_dim}, in_dim={in_dim}")
+            self.feat_proj = None
+
+        # projection for LLM → KG
+        self.entity_proj = nn.Linear(text_dim, in_dim)
+
+        # relation embeddings
         self.rel_embedding = nn.Embedding(num_relations * 2, in_dim)
 
         # scoring MLP
-        feature_dim = in_dim + out_dim
+        feature_dim = in_dim * 2
         self.linear = nn.Linear(feature_dim, out_dim)
         self.mlp = nn.Sequential(
             nn.Linear(out_dim, out_dim),
@@ -185,7 +202,9 @@ class ConditionedPNA(PNA):
             nn.Linear(out_dim, 1)
         )
 
-        self.layer_norms = nn.ModuleList([nn.LayerNorm(out_dim) for _ in range(num_layers)])
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(out_dim) for _ in range(num_layers)
+        ])
 
     ###########################################
     # scoring
@@ -210,22 +229,68 @@ class ConditionedPNA(PNA):
     # init input embeddings
     ###########################################
     def init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch):
-        # Tạo x với dtype mặc định
+        """
+        x: repeated node features (B * N, in_dim)
+        h_emb: head embeddings from LLM (batch_size, text_dim)
+        t_emb: tail embeddings (batch_size, in_dim) OR (batch_size, r)
+        rel_emb: (batch_size, in_dim)
+        """
+        # clone to avoid modifying original graph.x
         x = x.clone()
-        # Đảm bảo t_emb và h_emb cùng kiểu với x trước khi gán
-        x[t_idx] = t_emb.to(x.dtype)
-        x[h_idx] = h_emb.to(x.dtype)
-        # Tính score "nền" (background) dựa trên relation embedding và vector 0
+
+        # --- normalize device & dtype ---
+        device = x.device
+        dtype = x.dtype
+        target_proj_dtype = self.entity_proj.weight.dtype 
+
+        # Lấy kích thước đích trực tiếp từ x
+        target_dim = x.size(-1)
+
+        # DEBUG LOG
+        print(f"[DEBUG] init_input_embeds: x_dim={target_dim}, t_emb_dim={t_emb.size(-1)}")
+
+        # -------- HEAD EMB --------
+        if h_emb is not None:
+            h_emb = h_emb.to(device=device)
+            if not torch.is_floating_point(h_emb): h_emb = h_emb.float()
+            h_emb = h_emb.to(dtype=target_proj_dtype)
+            h_proj = self.entity_proj(h_emb).to(device=device, dtype=dtype)
+        else:
+            h_proj = None
+
+        # -------- TAIL EMB --------
+        if t_emb is not None:
+            t_emb = t_emb.to(device=device)
+            if not torch.is_floating_point(t_emb): t_emb = t_emb.float()
+
+            # Nếu t_emb có kích thước khớp với x (ví dụ cả hai đều 32), dùng luôn
+            if t_emb.size(-1) == target_dim:
+                t_proj = t_emb.to(dtype=dtype)
+            else:
+                # Nếu lệch (ví dụ t_emb=32, x=1594), buộc phải chiếu (project)
+                t_emb = t_emb.to(dtype=target_proj_dtype)
+                t_proj = self.entity_proj(t_emb).to(dtype=dtype)
+
+            t_proj = t_proj.to(device=device)
+        else:
+            t_proj = None
+
+        # Assign
+        if t_proj is not None:
+            x[t_idx] = t_proj
+        if h_proj is not None:
+            x[h_idx] = h_proj
+
+        # -------- SCORE --------
+        rel_emb = rel_emb.to(device=device, dtype=dtype)
         dummy_hidden = torch.zeros_like(rel_emb)
         background_score = self.score(dummy_hidden, rel_emb)
-        # Mở rộng background score cho từng node dựa trên batch index
-        score = background_score[batch]
-        score = score.to(torch.float32)
-        # score = torch.zeros(batch.size(0), device=x.device, dtype=torch.float32)
-        calculated_score = self.score(h_emb, rel_emb)
-        score[h_idx] = calculated_score.to(dtype=torch.float32)
-        # Mở rộng score
-        # score = score.repeat_interleave((batch == batch.unique()[0]).sum())
+        score = background_score[batch].to(torch.float32)
+
+        if h_proj is not None:
+            calculated_score = self.score(h_proj.to(dtype=dtype), rel_emb)
+            score[h_idx] = calculated_score.to(torch.float32)
+
         return x, score
 
     ###########################################
@@ -236,9 +301,7 @@ class ConditionedPNA(PNA):
         Memory-safe edge selection (PyG rewrite).
         Performs per-batch top-k instead of global top-k.
         """
-
         selected_edges = []
-
         # loop over each graph instance in the minibatch
         for b in batch.unique():
             mask = (batch == b)         # nodes belonging to graph b
@@ -382,7 +445,20 @@ class ConditionedPNA(PNA):
 
         batch_size = h_index.size(0)
         device = score_text_embs.device
-        num_nodes = score_text_embs.size(0)
+        # Lấy feature gốc từ graph
+        x_orig = graph.x.to(device)
+        if not torch.is_floating_point(x_orig):
+            x_orig = x_orig.float()
+
+        # Nếu có lớp chiếu (feat_proj), nén 1594 -> 32
+        if self.feat_proj is not None:
+            x_processed = self.feat_proj(x_orig)
+        else:
+            print(f"[WARNING] Using raw graph.x dim={x_orig.size(-1)} without projection!")
+            x_processed = x_orig
+            
+        # Cập nhật lại num_nodes dựa trên feature thực tế
+        num_nodes = x_processed.size(0)
 
         # 2) IMPORTANT: take the head/tail *original* node indices BEFORE offsets
         #    we'll need original tail embeddings (from score_text_embs) to place into repeated graph
@@ -391,7 +467,7 @@ class ConditionedPNA(PNA):
 
         # 3) build repeated graph tensors (repeat node features and edges)
         edge_index_undirected = to_undirected(graph.edge_index)
-        x_rep, e_rep, batch_rep = repeat_graph(graph.x, edge_index_undirected, batch_size)
+        x_rep, e_rep, batch_rep = repeat_graph(x_processed, edge_index_undirected, batch_size)
         # x_rep: (B * num_nodes, in_dim)
         # e_rep: (2, B * num_edges)
         # batch_rep: (B * num_nodes,)
@@ -409,7 +485,7 @@ class ConditionedPNA(PNA):
         head_embs = hidden_states.to(x_rep.dtype)
 
         # tail embeddings must be collected from the original node features score_text_embs
-        tail_embs = score_text_embs[tail_orig_idx].to(x_rep.dtype)  # (batch_size, in_dim)
+        tail_embs = x_processed[tail_orig_idx].to(x_rep.dtype)  # (batch_size, in_dim)
 
         # 7) init input embeddings for the repeated graph
         # signature: init_input_embeds(self, x, h_emb, h_idx, t_emb, t_idx, rel_emb, batch)
@@ -478,4 +554,4 @@ class ConditionedPNA(PNA):
 
         # 10) final indexing to get scores for requested tails (t_index already shifted to repeated index)
         return final
-    
+        
