@@ -117,7 +117,7 @@ class MKGL(LlamaForCausalLM):
             batch_size, device=hidden_states.device), input_length-2]
 
 
-        pred = self.score_retriever(h_id, r_id, t_id, hr_hidden_states, rel_token_embs, graph, all_index, all_kgl_index)
+        pred = self.score_retriever(h_id, r_id, t_id, hr_hidden_states, rel_hidden_states, graph, all_index, all_kgl_index)
         return pred
     
 
@@ -329,8 +329,6 @@ class KGL4KGC(nn.Module):
         target = torch.cat([pos_t_index, pos_h_index], dim=0)
 
         return mask, target
-
-
         
     def predict_and_target(self, batch, all_loss=None, metric=None):
         return self.predict(batch, all_loss, metric), self.target(batch)
@@ -343,11 +341,11 @@ class KGL4KGC(nn.Module):
         self.num_entity = dataset.num_entity
         self.num_relation = dataset.num_relation
         num_edges = dataset.graph.edge_index.size(1)
-        fact_mask = torch.ones(num_edges, dtype=torch.bool)  # start with all True
-        fact_mask[valid_set.indices] = False
-        fact_mask[test_set.indices] = False
+        # fact_mask = torch.ones(num_edges, dtype=torch.bool)  # start with all True
+        # fact_mask[valid_set.indices] = False
+        # fact_mask[test_set.indices] = False
         self.graph = dataset.graph
-        self.fact_graph = edge_mask(dataset.graph, fact_mask)
+        self.fact_graph = dataset.fact_graph
         return train_set, valid_set, test_set
 
     def id2tokenid(self, id, split='test', entity=True):
@@ -380,53 +378,76 @@ class KGL4KGC(nn.Module):
         num_entity = self.num_entity
         num_negative = self.num_negative
 
+        h_all = self.fact_graph.edge_index[0].to(device)
+        t_all = self.fact_graph.edge_index[1].to(device)
+        r_all = self.fact_graph.edge_type.to(device)
+
         ###########################################
         # Tail negatives
         ###########################################
-        t_neg = []
+        # --- 1. Tail Negatives ---
+        # Find all edges (h, r, ?) in fact_graph matching current batch
+        # [E, 1] == [1, B] -> [E, B] mask
+        mask_t_edges = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
+                       (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
+        
+        # This sparse lookup is safer for memory than dense masks
+        matches = mask_t_edges.nonzero() # [k, 2] -> col 0: edge_idx, col 1: batch_idx
+        
+        # Prepare list to collect negatives
+        neg_t_list = []
+        
+        # Iterate over batch to sample (cannot be easily fully vectorized without advanced scatter)
+        # But we can optimize by pre-grouping
+        # Optimization: Loop is acceptable for batch_size ~ 1024
         for i in range(batch_size):
-            candidates = torch.arange(num_entity, device=device)
+            # Find true tails for this sample
+            # Filter matches where batch_idx == i
+            edge_indices = matches[matches[:, 1] == i, 0]
+            true_tails = t_all[edge_indices]
+            
+            # Mask
             mask = torch.ones(num_entity, dtype=torch.bool, device=device)
-            mask[pos_t_index[i]] = 0  # exclude positive tail
-            candidates = candidates[mask]
-
-            if candidates.size(0) <= num_negative:
-                sampled = candidates
+            mask[true_tails] = 0
+            
+            # Sample
+            candidates = mask.nonzero().flatten()
+            if len(candidates) > num_negative:
+                 # Random choice without replacement
+                 perm = torch.randperm(len(candidates), device=device)[:num_negative]
+                 sampled = candidates[perm]
             else:
-                perm = torch.randperm(candidates.size(0), device=device)[:num_negative]
-                sampled = candidates[perm]
-            t_neg.append(sampled)
-        neg_t_index = torch.stack(t_neg, dim=0)  # (batch_size, num_negative)
-
+                 # Replacement if not enough negatives (rare)
+                 sampled = candidates[torch.randint(0, len(candidates), (num_negative,), device=device)]
+            neg_t_list.append(sampled)
+            
+        neg_t_index = torch.stack(neg_t_list)
         ###########################################
         # Head negatives
         ###########################################
-        h_neg = []
+        mask_h_edges = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
+                       (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
+        matches_h = mask_h_edges.nonzero()
+
+        neg_h_list = []
         for i in range(batch_size):
-            candidates = torch.arange(num_entity, device=device)
+            edge_indices = matches_h[matches_h[:, 1] == i, 0]
+            true_heads = h_all[edge_indices]
+            
             mask = torch.ones(num_entity, dtype=torch.bool, device=device)
-            mask[pos_h_index[i]] = 0
-            candidates = candidates[mask]
-
-            if candidates.size(0) <= num_negative:
-                sampled = candidates
+            mask[true_heads] = 0
+            
+            candidates = mask.nonzero().flatten()
+            if len(candidates) > num_negative:
+                 perm = torch.randperm(len(candidates), device=device)[:num_negative]
+                 sampled = candidates[perm]
             else:
-                perm = torch.randperm(candidates.size(0), device=device)[:num_negative]
-                sampled = candidates[perm]
-            h_neg.append(sampled)
-        neg_h_index = torch.stack(h_neg, dim=0)  # (batch_size, num_negative)
+                 sampled = candidates[torch.randint(0, len(candidates), (num_negative,), device=device)]
+            neg_h_list.append(sampled)
 
-        ###########################################
-        # Concatenate heads and tails if needed
-        ###########################################
-        # Optional: depends on your model usage
-        neg_index = torch.cat([neg_t_index, neg_h_index], dim=0)
+        neg_h_index = torch.stack(neg_h_list)
 
-        return neg_index
-
-
-
-
+        return torch.cat([neg_t_index, neg_h_index], dim=0)
 
 class KGL4IndKGC(KGL4KGC):
 
@@ -462,4 +483,3 @@ class KGL4IndKGC(KGL4KGC):
 
     def get_eval_graph(self, batch):
         return self.inductive_graph if batch.split == "test" else self.graph
-

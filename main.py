@@ -61,10 +61,11 @@ if __name__ == "__main__":
     else:
         dataset = KGCDataset.load(file_path)
     tokenizer = dataset.tokenizer
-    cfg.context_retriever.kg_encoder.num_relation = int(
-        dataset.kgdata.num_relation)
-    cfg.score_retriever.kg_encoder.num_relation = int(
-        dataset.kgdata.num_relation)
+    num_rel = int(dataset.kgdata.num_relation)
+    cfg.context_retriever.kg_encoder.num_relation = num_rel
+    cfg.context_retriever.kg_encoder.num_relations = num_rel 
+    cfg.score_retriever.kg_encoder.num_relation = num_rel
+    cfg.score_retriever.kg_encoder.num_relations = num_rel
     
     #torch.nn.Module = torch.nn._Module
     config = MKGLConfig.from_pretrained(**cfg.mkglconfig)
@@ -128,4 +129,3 @@ if __name__ == "__main__":
     )
     trainer.evaluate()
     trainer.train()
-

@@ -44,22 +44,59 @@ class InductiveKnowledgeGraphDataset(Dataset):
             
         tensor_triplets = torch.tensor(triplets, dtype=torch.long)
         edge_index = torch.stack([tensor_triplets[:, 0], tensor_triplets[:, 1]], dim=0)
-        edge_type = tensor_triplets[:, 2]
-        return Data(edge_index=edge_index, edge_type=edge_type, num_nodes=num_nodes)
-
-    def _finalize_vocab(self, inv_vocab):
-        sorted_items = sorted(inv_vocab.items(), key=lambda x: x[1])
-        vocab_list = [k for k, v in sorted_items]
-        return vocab_list, inv_vocab
+        edge_attr = tensor_triplets[:, 2]
+        x = torch.arange(num_nodes, dtype=torch.long)
+        return Data(x =x,edge_index=edge_index, edge_attr=edge_attr, num_nodes=num_nodes)
 
     def load_inductive_tsvs(self, transductive_files, inductive_files, verbose=0):
-        inv_transductive_vocab = {}
-        inv_inductive_vocab = {}
-        inv_relation_vocab = {}
+        # Bước 1: Quét Vocab & Sort Alphabet
+        trans_entities = set()
+        ind_entities = set()
+        relations = set()
+
+        # Quét file Transductive
+        for txt_file in transductive_files:
+            with open(txt_file, "r") as fin:
+                reader = csv.reader(fin, delimiter="\t")
+                for tokens in reader:
+                    if len(tokens) < 3: continue
+                    h, r, t = tokens[:3]
+                    trans_entities.add(h)
+                    trans_entities.add(t)
+                    relations.add(r)
+        
+        # Quét file Inductive
+        for txt_file in inductive_files:
+            with open(txt_file, "r") as fin:
+                reader = csv.reader(fin, delimiter="\t")
+                for tokens in reader:
+                    if len(tokens) < 3: continue
+                    h, r, t = tokens[:3]
+                    ind_entities.add(h)
+                    ind_entities.add(t)
+                    # Quan trọng: Inductive Relation phải nằm trong tập Relation gốc
+                    # Ở đây ta cứ add vào set để đảm bảo không crash, nhưng assert logic sau này
+                    relations.add(r) 
+
+        # Sort Alphabetical để khớp với logic của LLM
+        self.transductive_vocab = sorted(list(trans_entities))
+        self.inductive_vocab = sorted(list(ind_entities))
+        self.relation_vocab = sorted(list(relations))
+
+        # Tạo Inverse Mapping (Token -> ID)
+        self.inv_transductive_vocab = {v: k for k, v in enumerate(self.transductive_vocab)}
+        self.inv_inductive_vocab = {v: k for k, v in enumerate(self.inductive_vocab)}
+        self.inv_relation_vocab = {v: k for k, v in enumerate(self.relation_vocab)}
+
+        self._num_transductive_nodes = len(self.transductive_vocab)
+        self._num_inductive_nodes = len(self.inductive_vocab)
+        self._num_relations = len(self.relation_vocab)
+
+        # Bước 2: Load triplets bằng ID đã sort
         triplets = []
         num_samples = []
 
-        # 1. Load Transductive
+        # 2.1 Load Transductive
         for txt_file in transductive_files:
             with open(txt_file, "r") as fin:
                 reader = csv.reader(fin, delimiter="\t")
@@ -67,29 +104,21 @@ class InductiveKnowledgeGraphDataset(Dataset):
                     reader = tqdm(list(reader), desc=f"Loading {os.path.basename(txt_file)}")
                 else:
                     reader = list(reader)
-
+                
                 num_sample = 0
                 for tokens in reader:
                     if len(tokens) < 3: continue
                     h_token, r_token, t_token = tokens[:3]
                     
-                    if h_token not in inv_transductive_vocab:
-                        inv_transductive_vocab[h_token] = len(inv_transductive_vocab)
-                    h = inv_transductive_vocab[h_token]
-                    
-                    if r_token not in inv_relation_vocab:
-                        inv_relation_vocab[r_token] = len(inv_relation_vocab)
-                    r = inv_relation_vocab[r_token]
-                    
-                    if t_token not in inv_transductive_vocab:
-                        inv_transductive_vocab[t_token] = len(inv_transductive_vocab)
-                    t = inv_transductive_vocab[t_token]
+                    h = self.inv_transductive_vocab[h_token]
+                    t = self.inv_transductive_vocab[t_token]
+                    r = self.inv_relation_vocab[r_token]
                     
                     triplets.append((h, t, r))
                     num_sample += 1
             num_samples.append(num_sample)
 
-        # 2. Load Inductive
+        # 2.2 Load Inductive
         for txt_file in inductive_files:
             with open(txt_file, "r") as fin:
                 reader = csv.reader(fin, delimiter="\t")
@@ -97,43 +126,27 @@ class InductiveKnowledgeGraphDataset(Dataset):
                     reader = tqdm(list(reader), desc=f"Loading {os.path.basename(txt_file)}")
                 else:
                     reader = list(reader)
-
+                
                 num_sample = 0
                 for tokens in reader:
                     if len(tokens) < 3: continue
                     h_token, r_token, t_token = tokens[:3]
                     
-                    if h_token not in inv_inductive_vocab:
-                        inv_inductive_vocab[h_token] = len(inv_inductive_vocab)
-                    h = inv_inductive_vocab[h_token]
-                    
-                    if r_token not in inv_relation_vocab:
-                        # Should exist in transductive, but if not, add it
-                        inv_relation_vocab[r_token] = len(inv_relation_vocab)
-                    r = inv_relation_vocab[r_token]
-                    
-                    if t_token not in inv_inductive_vocab:
-                        inv_inductive_vocab[t_token] = len(inv_inductive_vocab)
-                    t = inv_inductive_vocab[t_token]
+                    h = self.inv_inductive_vocab[h_token]
+                    t = self.inv_inductive_vocab[t_token]
+
+                    r = self.inv_relation_vocab[r_token]
                     
                     triplets.append((h, t, r))
                     num_sample += 1
             num_samples.append(num_sample)
 
-        # 3. Finalize Vocabs
-        self.transductive_vocab, self.inv_transductive_vocab = self._finalize_vocab(inv_transductive_vocab)
-        self.inductive_vocab, self.inv_inductive_vocab = self._finalize_vocab(inv_inductive_vocab)
-        self.relation_vocab, self.inv_relation_vocab = self._finalize_vocab(inv_relation_vocab)
-
-        self._num_transductive_nodes = len(self.transductive_vocab)
-        self._num_inductive_nodes = len(self.inductive_vocab)
-        self._num_relations = len(self.relation_vocab)
-
-        # 4. Create Graphs
+        # 3. Create Graphs
+        # Indices logic: [TransTrain, TransValid, TransTest, IndTrain, IndValid, IndTest]
         idx_trans_train = num_samples[0]
         idx_trans_all = sum(num_samples[:3])
         idx_ind_train_start = sum(num_samples[:3])
-        idx_ind_train_end = sum(num_samples[:4])
+        idx_ind_train_end = sum(num_samples[:4]) # Inductive Train end
         
         self.fact_graph = self._create_pyg_graph(
             triplets[:idx_trans_train], self._num_transductive_nodes, self._num_relations
@@ -148,11 +161,26 @@ class InductiveKnowledgeGraphDataset(Dataset):
             triplets[idx_ind_train_start:], self._num_inductive_nodes, self._num_relations
         )
 
+        # Slice triplets for getitem/dataloader
+        # Dataset logic: self.triplets contains:
+        # 1. Transductive (Train + Valid)
+        # 2. Inductive (Valid + Test)  <-- Note: Inductive Train is usually ONLY in the graph, not evaluated on directly in standard loops unless specified
+        
+        # num_samples: [TrTr, TrVal, TrTest, InTr, InVal, InTest]
+        # slice 1: TrTr + TrVal
         slice_1 = triplets[:sum(num_samples[:2])] 
-        slice_2 = triplets[sum(num_samples[:4]):] 
+        
+        # slice 2: Inductive Valid + Test (Skip Inductive Train for evaluation triplets)
+        # Inductive Train is at index 3. Valid is 4. Test is 5.
+        start_idx = sum(num_samples[:4]) # Skip TrTr, TrVal, TrTest, InTr
+        slice_2 = triplets[start_idx:] 
+        
         self.triplets = torch.tensor(slice_1 + slice_2, dtype=torch.long)
+        
+        # Update num_samples list to match the sliced triplets structure
+        # [TrTrain, TrValid, InValid + InTest]
         self.num_samples = num_samples[:2] + [sum(num_samples[4:])]
-
+    
     def __getitem__(self, index):
         return self.triplets[index]
 
@@ -168,16 +196,34 @@ class InductiveKnowledgeGraphDataset(Dataset):
             offset += num_sample
         return splits
 
-
 class StandardKGCDataset(InductiveKnowledgeGraphDataset):
     """Base class for standard (transductive) datasets."""
     
     def load_standard_tsvs(self, files, verbose=0):
-        inv_entity_vocab = {}
-        inv_relation_vocab = {}
+        # 1. Collect & Sort
+        entities = set()
+        relations = set()
+        for txt_file in files:
+            with open(txt_file, "r") as fin:
+                reader = csv.reader(fin, delimiter="\t")
+                for tokens in reader:
+                    if len(tokens) < 3: continue
+                    h, r, t = tokens[:3]
+                    entities.add(h); entities.add(t); relations.add(r)
+
+        self.transductive_vocab = sorted(list(entities))
+        self.relation_vocab = sorted(list(relations))
+        self.inductive_vocab = [] 
+        
+        self.inv_transductive_vocab = {v: k for k, v in enumerate(self.transductive_vocab)}
+        self.inv_relation_vocab = {v: k for k, v in enumerate(self.relation_vocab)}
+        
+        self._num_transductive_nodes = len(self.transductive_vocab)
+        self._num_relations = len(self.relation_vocab)
+
+        # 2. Load Triplets
         triplets = []
         num_samples = []
-
         for txt_file in files:
             with open(txt_file, "r") as fin:
                 reader = csv.reader(fin, delimiter="\t")
@@ -185,34 +231,17 @@ class StandardKGCDataset(InductiveKnowledgeGraphDataset):
                     reader = tqdm(list(reader), desc=f"Loading {os.path.basename(txt_file)}")
                 else:
                     reader = list(reader)
-
+                
                 num_sample = 0
                 for tokens in reader:
                     if len(tokens) < 3: continue
                     h_token, r_token, t_token = tokens[:3]
-
-                    if h_token not in inv_entity_vocab:
-                        inv_entity_vocab[h_token] = len(inv_entity_vocab)
-                    h = inv_entity_vocab[h_token]
-
-                    if r_token not in inv_relation_vocab:
-                        inv_relation_vocab[r_token] = len(inv_relation_vocab)
-                    r = inv_relation_vocab[r_token]
-
-                    if t_token not in inv_entity_vocab:
-                        inv_entity_vocab[t_token] = len(inv_entity_vocab)
-                    t = inv_entity_vocab[t_token]
-
+                    h = self.inv_transductive_vocab[h_token]
+                    t = self.inv_transductive_vocab[t_token]
+                    r = self.inv_relation_vocab[r_token]
                     triplets.append((h, t, r))
                     num_sample += 1
             num_samples.append(num_sample)
-
-        self.transductive_vocab, self.inv_transductive_vocab = self._finalize_vocab(inv_entity_vocab)
-        self.relation_vocab, self.inv_relation_vocab = self._finalize_vocab(inv_relation_vocab)
-        self.inductive_vocab = [] 
-        
-        self._num_transductive_nodes = len(self.transductive_vocab)
-        self._num_relations = len(self.relation_vocab)
 
         self.fact_graph = self._create_pyg_graph(
             triplets[:num_samples[0]], self._num_transductive_nodes, self._num_relations
@@ -220,13 +249,11 @@ class StandardKGCDataset(InductiveKnowledgeGraphDataset):
         self.graph = self._create_pyg_graph(
             triplets, self._num_transductive_nodes, self._num_relations
         )
-        # No inductive graphs
         self.inductive_fact_graph = None
         self.inductive_graph = None
 
         self.triplets = torch.tensor(triplets, dtype=torch.long)
         self.num_samples = num_samples
-
 
 # --- Inductive Classes ---
 

@@ -1,18 +1,14 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-#from torchdrug import core
+# from torchdrug import core
 from gnn2.model import *
-
-
-
 
 class BasePNARetriever(nn.Module): 
     '''
     Retrieve text information
     '''
 
-    
     def __init__(self, config, text_embeddings, kgl2token, orig_vocab_size):
         super().__init__()
         self.config = config
@@ -40,28 +36,44 @@ class BasePNARetriever(nn.Module):
         token_mask = (token_ids > 0).unsqueeze(-1).to(device) # B x L X 1
         token_lengths = token_mask.half().sum(axis=1).to(device) # B X 1
         degree = token_lengths
-        token_embs = text_embeddings[token_ids] # B x L x Hidden
+        token_embs = text_embeddings[token_ids].float() # B x L x Hidden, ép kiểu float32 để tránh NaN
         
-        mean = (token_embs * token_mask).sum(axis=1) / token_lengths
+        mean = (token_embs * token_mask).sum(axis=1) / token_lengths.clamp(min=1e-9)
         if method == 'mean':
             result = mean
         else:
             sq_mean = (token_embs**2 * token_mask).sum(axis=1) / \
-                token_lengths
-            max, _ = (token_embs*token_mask).max(axis=1)
-            min, _ = (token_embs*token_mask).min(axis=1)
-            std = (sq_mean - mean ** 2).clamp(min=1e-6).sqrt()
-            features = torch.cat(
-                [mean, max, min, std], dim=-1)
+                token_lengths.clamp(min=1e-9)
             
+            # Masking để tránh lấy max/min của padding (token 0)
+            # Gán giá trị rất nhỏ/lớn cho phần padding trước khi max/min
+            masked_embs_for_max = token_embs.clone()
+            masked_embs_for_max[token_mask.squeeze(-1) == 0] = -1e9
+            max_val, _ = masked_embs_for_max.max(axis=1)
+
+            masked_embs_for_min = token_embs.clone()
+            masked_embs_for_min[token_mask.squeeze(-1) == 0] = 1e9
+            min_val, _ = masked_embs_for_min.min(axis=1)
+
+            # Tính std an toàn
+            var = (sq_mean - mean ** 2).clamp(min=1e-6)
+            std = var.sqrt()
+            
+            features = torch.cat(
+                [mean, max_val, min_val, std], dim=-1)
+            
+            # Xử lý scale
             scale = degree.log()
-            scale = scale / scale.mean()
+            div_scale = scale.mean()
+            if div_scale == 0: 
+                div_scale = 1.0
+            
+            scale = scale / div_scale
             scales = torch.cat(
                 [torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)
             
             result = (features.unsqueeze(-1) *
                       scales.unsqueeze(-2)).flatten(-2)
-
         return result 
     
     def retrieve_text(self, token_ids):
@@ -86,8 +98,6 @@ class BasePNARetriever(nn.Module):
         else:
             token_ids = self.kgl2token
         return self.retrieve_text(token_ids)
-        
-
 
 class ContextRetriever(BasePNARetriever):
 
@@ -100,9 +110,7 @@ class ContextRetriever(BasePNARetriever):
         text_embs = super().forward(kgl_ids)
         context = self.up_scaling(text_embs)
         return context
-        
-
-        
+         
 class ScoreRetriever(BasePNARetriever):
     
     def __init__(self, config, *args, **kwargs):

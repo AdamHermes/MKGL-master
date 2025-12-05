@@ -391,7 +391,7 @@ class ConditionedPNA(PNA):
 
         # 3) build repeated graph tensors (repeat node features and edges)
         edge_index_undirected = to_undirected(graph.edge_index)
-        x_rep, e_rep, batch_rep = repeat_graph(score_text_embs, edge_index_undirected, batch_size)
+        x_rep, e_rep, batch_rep = repeat_graph(graph.x, edge_index_undirected, batch_size)
         # x_rep: (B * num_nodes, in_dim)
         # e_rep: (2, B * num_edges)
         # batch_rep: (B * num_nodes,)
