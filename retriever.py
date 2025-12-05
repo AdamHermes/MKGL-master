@@ -107,28 +107,76 @@ class ScoreRetriever(BasePNARetriever):
     
     def __init__(self, config, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
+        
+        # Parse kg_encoder config
         cfg_kg = config.kg_encoder
-
+        cfg_base_layer = cfg_kg.base_layer
+        
+        # Create base layer with proper attributes
+        base_layer = PNALayer(
+            input_dim=cfg_base_layer.input_dim,
+            output_dim=cfg_base_layer.output_dim,
+            query_input_dim=cfg_base_layer.get("query_input_dim", cfg_base_layer.input_dim),
+            message_func=cfg_base_layer.get("message_func", "distmult"),
+            aggregate_func=cfg_base_layer.get("aggregate_func", "pna"),
+            layer_norm=cfg_base_layer.get("layer_norm", True),
+            dependent=cfg_base_layer.get("dependent", True),
+            num_relation=1  # or get from config if available
+        )
+        
+        # Create ConditionedPNA with base_layer
         self.kg_retriever = ConditionedPNA(
-            in_dim=cfg_kg.in_dim,
-            out_dim=cfg_kg.out_dim,
-            num_relations=cfg_kg.num_relations,
-            num_layers=cfg_kg.get("num_layer", 6),
+            base_layer=base_layer,
+            num_layer=cfg_kg.get("num_layer", 6),
+            num_mlp_layer=cfg_kg.get("num_mlp_layer", 2),
             node_ratio=cfg_kg.get("node_ratio", 0.1),
             degree_ratio=cfg_kg.get("degree_ratio", 1),
+            remove_one_hop=cfg_kg.get("remove_one_hop", False)
         )
-        #self.kg_retriever = ConditionedPNA(config.kg_encoder)
+        
+        # Down-scaling layers
         self.h_down_scaling = nn.Linear(
-                self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
+            self.config.llm_hidden_dim, self.config.r, 
+            bias=False, dtype=torch.float
+        )
         self.r_down_scaling = nn.Linear(
-                self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
+            self.config.llm_hidden_dim, self.config.r, 
+            bias=False, dtype=torch.float
+        )
 
-    def forward(self, h_id, r_id, t_id,  hidden_states, rel_hidden_states, graph, all_index, all_kgl_index):
-
+    def forward(self, h_id, r_id, t_id, hidden_states, rel_hidden_states, 
+                graph, all_index, all_kgl_index):
+        """
+        Forward pass for score retrieval
+        
+        Args:
+            h_id: Head entity IDs [batch_size, num_samples]
+            r_id: Relation IDs [batch_size, num_samples]
+            t_id: Tail entity IDs [batch_size, num_samples]
+            hidden_states: Entity embeddings from LLM [num_entities, llm_hidden_dim]
+            rel_hidden_states: Relation embeddings [num_relations, llm_hidden_dim]
+            graph: PyTorch Geometric Data object with KG structure
+            all_index: All entity indices [num_entities]
+            all_kgl_index: All KGL entity indices
+        
+        Returns:
+            score: Prediction scores [batch_size, num_samples]
+        """
+        # Get text embeddings for all entities
         score_text_embs = super().forward(all_kgl_index)
-        head_embeds = self.h_down_scaling(hidden_states) 
-        rel_embeds = self.r_down_scaling(rel_hidden_states) 
-        score = self.kg_retriever(h_id, r_id, t_id, head_embeds, rel_embeds, graph, score_text_embs,all_index)
+        
+        # Down-scale LLM embeddings to model dimension
+        head_embeds = self.h_down_scaling(hidden_states)
+        rel_embeds = self.r_down_scaling(rel_hidden_states)
+        
+        # Get scores from KG retriever
+        score = self.kg_retriever(
+            h_id, r_id, t_id, 
+            head_embeds, rel_embeds, 
+            graph, 
+            score_text_embs, 
+            all_index
+        )
         
         return score
 

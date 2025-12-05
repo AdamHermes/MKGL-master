@@ -3,6 +3,7 @@ output_dir: &output_dir outputs/
 model_name: &model_name TinyLlama/TinyLlama-1.1B-Chat-v1.0
 kgl_token_length: 10
 
+
 dataset:
   class: FB15k237
   path: data/datasets/
@@ -23,11 +24,11 @@ loraconfig:
   r: &r 32
   lora_alpha: 8
   lora_dropout: 0.05
-  target_modules:
-    # - embed_tokens
-    # - lm_head
-    - q_proj
-    - v_proj
+  target_modules: 
+  # - embed_tokens
+  # - lm_head
+  - q_proj
+  - v_proj
 
 trainer:
   output_dir: *output_dir
@@ -35,9 +36,9 @@ trainer:
   save_total_limit: 1
   per_device_train_batch_size: 4
   per_device_eval_batch_size: 16
-  eval_strategy: epoch
+  evaluation_strategy: epoch
   eval_steps: 500
-  save_strategy: "no" #epoch
+  save_strategy: 'no' #epoch
   warmup_steps: 50
   bf16: yes
   logging_steps: 10
@@ -48,12 +49,12 @@ trainer:
   save_safetensors: no
   remove_unused_columns: no
   label_names:
-    - label
+  - label
   optim: adamw_8bit
   max_grad_norm: 1.
   ddp_find_unused_parameters: yes
   report_to:
-    - tensorboard
+  - tensorboard
 
 mkgl4kgc:
   criterion: bce
@@ -66,11 +67,17 @@ context_retriever:
   r: *r
   text_encoder: pna
   kg_encoder:
-    in_dim: *r
-    out_dim: *r
-    num_relations: 472
-    hidden_dim: 256
-    num_layers: 1
+    class: PNA
+    base_layer:
+      class: PNALayer
+      input_dim: *r
+      output_dim: *r
+      query_input_dim: *r
+      message_func: distmult
+      aggregate_func: pna
+      layer_norm: yes
+      dependent: yes
+    num_layer: 1
     remove_one_hop: yes
     node_ratio: 0.1
 
@@ -79,10 +86,15 @@ score_retriever:
   r: *r
   text_encoder: pna
   kg_encoder:
-    in_dim: *r # input feature dimension
-    out_dim: *r # output embedding dimension
-    num_relations: 472 # number of relations in FB15k-237
-    hidden_dim: 256 # hidden dim inside ConditionedPNA MLP (optional)
-    num_layers: 2 # corresponds to TorchDrug num_layer
-    remove_one_hop: yes # keep same
-    node_ratio: 0.1 # same as TorchDrug
+    class: ConditionedPNA
+    base_layer:
+      class: PNALayer
+      input_dim: *r
+      output_dim: *r
+      query_input_dim: *r
+      aggregate_func: pna
+      layer_norm: yes
+      dependent: yes
+    num_layer: 6
+    remove_one_hop: yes
+    node_ratio: 0.1
