@@ -27,7 +27,7 @@ class MKGL(LlamaForCausalLM):
     def __init__(self, config):
         super().__init__(config)
 
-    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg,):
+    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg):
         self.kgl2token = kgl2token
         self.orig_vocab_size = orig_vocab_size
         

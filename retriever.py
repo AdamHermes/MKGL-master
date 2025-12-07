@@ -110,21 +110,22 @@ class ScoreRetriever(BasePNARetriever):
         
         # Parse kg_encoder config
         cfg_kg = config.kg_encoder
-        cfg_base_layer = cfg_kg.base_layer
+        cfg_base = cfg_kg.base_layer
         
         # Create base layer with proper attributes
+        # 2. Initialize Base Layer
+        # This is the single layer definition
         base_layer = PNALayer(
-            input_dim=cfg_base_layer.input_dim,
-            output_dim=cfg_base_layer.output_dim,
-            query_input_dim=cfg_base_layer.get("query_input_dim", cfg_base_layer.input_dim),
-            message_func=cfg_base_layer.get("message_func", "distmult"),
-            aggregate_func=cfg_base_layer.get("aggregate_func", "pna"),
-            layer_norm=cfg_base_layer.get("layer_norm", True),
-            dependent=cfg_base_layer.get("dependent", True),
-            num_relation=1  # or get from config if available
+            input_dim=cfg_base.input_dim,          # 32
+            output_dim=cfg_base.output_dim,        # 32
+            num_relation=cfg_kg.num_relation,            # PASSED FROM DATASET
+            query_input_dim=cfg_base.query_input_dim,
+            message_func=cfg_base.get("message_func", "distmult"),
+            layer_norm=cfg_base.get("layer_norm", False)
         )
         
-        # Create ConditionedPNA with base_layer
+        # 3. Initialize ConditionedPNA
+        # It will clone 'base_layer' 6 times (num_layer=6)
         self.kg_retriever = ConditionedPNA(
             base_layer=base_layer,
             num_layer=cfg_kg.get("num_layer", 6),
