@@ -204,7 +204,11 @@ class ConditionedPNA(PNA):
     def forward(self, h_index, r_index, t_index, hidden_states, rel_hidden_states, graph, score_text_embs, all_index):
         if self.training:
             graph = self.remove_easy_edges(graph, h_index, t_index, r_index)
-
+        max_id = graph.edge_index.max().item()
+        if max_id >= graph.num_nodes:
+            print(f"CRASH DETECTED: Max Node ID ({max_id}) >= graph.num_nodes ({graph.num_nodes})")
+            # Optional: Fix it dynamically to prevent crash during debug
+            graph.num_nodes = max_id + 1
         # PyG: To Undirected
         if graph.edge_attr is not None:
             edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr, num_nodes=graph.num_nodes)
