@@ -1,26 +1,15 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch_scatter import scatter_add
-
-# PyG Imports
+from torch_scatter import scatter_add, scatter
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import to_undirected, degree
-
 from torch_geometric.nn import MessagePassing
-from torch_scatter import scatter
-
-# Local Utils (Assumed available)
 from .util import VirtualTensor, bincount, variadic_topks
-# Note: RepeatGraph is usually replaced by PyG's Batch.from_data_list([g]*n)
-# but if you have a custom RepeatGraph for PyG, you can import it.
 
 class PNA(nn.Module):
     def __init__(self, base_layer, num_layer, num_mlp_layer=2, remove_one_hop=False):
         super(PNA, self).__init__()
-        
-        # In TorchDrug, base_layer is often a config dict or prototype.
-        # We assume base_layer is an instantiated object or class we can copy.
         import copy
         
         self.num_relation = getattr(base_layer, 'num_relation', None) 
@@ -32,34 +21,26 @@ class PNA(nn.Module):
             
         feature_dim = base_layer.output_dim + base_layer.input_dim
         
-        # Assuming you have a similar MLP class in your utils or use standard nn.Sequential
-        from .layer import MLP # or torchdrug.layers if you still import it
+        from .layer import MLP 
         self.mlp = MLP(feature_dim, [feature_dim] * (num_mlp_layer - 1) + [1])
         self.short_cut = getattr(base_layer, 'short_cut', False)
 
     def aggregate(self, graph, input_embeds):
         layer_input = input_embeds
         for layer in self.layers:
-            # PyG layers typically expect: x, edge_index, edge_attr
-            # We assume your base_layer.__call__ handles PyG Data objects
             hidden = layer(graph, layer_input)
-            
             if self.short_cut:
                 hidden = hidden + layer_input
             layer_input = hidden
-            
         return hidden
 
     def init_input_embeds(self, graph, input_embeds, input_index):
-        # Using VirtualTensor as requested
-        # Ensure graph.num_nodes is used (PyG syntax) vs graph.num_node (TorchDrug)
         input_embeds_full = VirtualTensor.zeros(graph.num_nodes, input_embeds.shape[-1], 
                                                 device=input_embeds.device, dtype=input_embeds.dtype)
         input_embeds_full[input_index] = input_embeds
         return input_embeds_full
 
     def forward(self, graph, input_embeds, input_index):
-        # 1. Undirected
         if graph.edge_attr is not None:
              edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr, num_nodes=graph.num_nodes)
              graph.edge_attr = edge_attr
@@ -67,10 +48,7 @@ class PNA(nn.Module):
              edge_index = to_undirected(graph.edge_index, num_nodes=graph.num_nodes)
         graph.edge_index = edge_index
         
-        # 2. Init
         input_embeds = self.init_input_embeds(graph, input_embeds, input_index)
-        
-        # 3. Aggregate
         output = self.aggregate(graph, input_embeds)
         return output
 
@@ -78,23 +56,18 @@ class PNA(nn.Module):
 class PNALayer(MessagePassing):
     def __init__(self, input_dim, output_dim, num_relation, query_input_dim=None, 
                  message_func="distmult", layer_norm=False, **kwargs):
-        # aggregators: mean, max, min, std (PNA standard)
         super().__init__(aggr=None, node_dim=0) 
         
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.num_relation = num_relation # Critical for ConditionedPNA
+        self.num_relation = num_relation 
         self.message_func = message_func
         
-        # PNA Aggregators
         self.aggregators = ["mean", "max", "min", "std"]
         self.scalers = ["identity", "amplification", "attenuation"]
         
-        # Relation Embedding (used inside the layer for message calculation)
         self.relation_linear = nn.Linear(input_dim, input_dim)
         
-        # Post-aggregation MLP
-        # Input is input_dim * len(aggregators) * len(scalers)
         total_dim = input_dim * len(self.aggregators) * len(self.scalers)
         self.mlp = nn.Sequential(
             nn.Linear(total_dim, output_dim),
@@ -108,46 +81,20 @@ class PNALayer(MessagePassing):
             self.layer_norm = None
 
     def forward(self, graph, input):
-        # ConditionedPNA passes 'graph' (Data object) and 'input' (Node features)
         edge_index = graph.edge_index
-        edge_attr = graph.edge_attr # Relation IDs
-        
-        # Start Message Passing
+        edge_attr = graph.edge_attr 
         out = self.propagate(edge_index, x=input, edge_attr=edge_attr)
         
         if self.layer_norm:
             out = self.layer_norm(out)
-            
         return out
 
     def message(self, x_j, edge_attr):
-        # x_j: Source node features [num_edges, dim]
-        # edge_attr: Relation IDs [num_edges]
-        
-        # Note: ConditionedPNA might handle relation embeddings differently, 
-        # but typically PNA Layer needs its own access or shared access.
-        # For simplicity, we assume relation embeddings are handled via the 
-        # relation_linear projection of the node or passed externally.
-        # However, strictly following TorchDrug structure, the layer usually 
-        # has its own relation parameters or receives them.
-        
-        # DistMult-style message: h * r
-        # Since we don't have the relation embedding matrix here easily without passing it,
-        # we often project x_j.
-        
-        # Adaptation for this specific architecture:
-        # If your config relies on "distmult", it implies element-wise product.
-        # We will apply a linear transform to simulate relation interaction 
-        # if explicit embeddings aren't passed.
-        
         msg = self.relation_linear(x_j) 
         return msg
 
     def aggregate(self, inputs, index, dim_size=None):
-        # PNA Aggregation Logic
         outs = []
-        
-        # 1. Aggregators
         for aggr in self.aggregators:
             if aggr == "mean":
                 out = scatter(inputs, index, dim=0, dim_size=dim_size, reduce="mean")
@@ -163,27 +110,16 @@ class PNALayer(MessagePassing):
             outs.append(out)
             
         out = torch.cat(outs, dim=-1)
-        
-        # 2. Scalers (Logarithmic degree scaling)
-        # We need degree for scalers.
-        # degree = degree(index, dim_size, dtype=input.dtype)
-        # For simplicity in this snippet, we stick to Identity if degree is missing,
-        # or assume degree is roughly uniform/handled by MLP. 
-        # A full PNA implementation requires pre-computed degree histograms.
-        
-        # To make this simple and robust:
-        # We repeat the output for scalers to match dimension expectation
         out = torch.cat([out] * len(self.scalers), dim=-1)
-        
         return out
     
     def update(self, inputs):
         return self.mlp(inputs)
 
+
 class ConditionedPNA(PNA):
     def __init__(self, base_layer, num_layer, num_mlp_layer=2, node_ratio=0.1, degree_ratio=1, test_node_ratio=None, test_degree_ratio=None,
                  break_tie=False, **kwargs):
-        
         super().__init__(base_layer, num_layer, num_mlp_layer=num_mlp_layer, **kwargs)
 
         self.node_ratio = node_ratio
@@ -202,40 +138,52 @@ class ConditionedPNA(PNA):
 
 
     def forward(self, h_index, r_index, t_index, hidden_states, rel_hidden_states, graph, score_text_embs, all_index):
+        print(f"DEBUG: START FORWARD | h_max={h_index.max()} t_max={t_index.max()} r_max={r_index.max()}")
+        print(f"DEBUG: GRAPH STATS | num_nodes={graph.num_nodes} edge_index_max={graph.edge_index.max()} edge_attr_max={graph.edge_attr.max() if graph.edge_attr is not None else 'None'}")
+        
+        if r_index.max() >= self.num_relation * 2:
+            print(f"CRASH PENDING: r_index {r_index.max()} >= limit {self.num_relation * 2}")
+        print("Got1")
         if self.training:
             graph = self.remove_easy_edges(graph, h_index, t_index, r_index)
+        print("Got2")
         max_id = graph.edge_index.max().item()
         if max_id >= graph.num_nodes:
-            print(f"CRASH DETECTED: Max Node ID ({max_id}) >= graph.num_nodes ({graph.num_nodes})")
-            # Optional: Fix it dynamically to prevent crash during debug
+            print(f"CRASH PENDING: Max Node ID ({max_id}) >= graph.num_nodes ({graph.num_nodes})")
             graph.num_nodes = max_id + 1
-        # PyG: To Undirected
+
         if graph.edge_attr is not None:
-            edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr, num_nodes=graph.num_nodes)
-            graph.edge_attr = edge_attr
+            print("Got3")
+            if graph.edge_attr.max() >= self.num_relation:
+                print(f"WARNING: edge_attr max {graph.edge_attr.max()} >= num_relation {self.num_relation} before undirected")
+            try:
+                edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr, num_nodes=graph.num_nodes)
+                graph.edge_attr = edge_attr
+            except RuntimeError as e:
+                print(f"CRASH IN TO_UNDIRECTED: {e}")
+                print(f"State: nodes={graph.num_nodes}, edge_index_shape={graph.edge_index.shape}, edge_attr_shape={graph.edge_attr.shape}")
+                raise e
         else:
+            print("Got4")
             edge_index = to_undirected(graph.edge_index, num_nodes=graph.num_nodes)
+            print("Got5")
         graph.edge_index = edge_index
 
-        # Negative Sampling
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
         
-        # Batching (RepeatGraph)
         batch_size = len(h_index)
-        # Using PyG Batch to replicate the graph logic
         graph_list = [graph.clone() for _ in range(batch_size)]
         graph = Batch.from_data_list(graph_list)
         
-        # Offset Logic (PyG uses graph.ptr for offsets [0, N, 2N...])
         node_counts = graph.ptr[:-1] 
         h_index = h_index + node_counts.unsqueeze(-1).to(h_index.device)
         t_index = t_index + node_counts.unsqueeze(-1).to(t_index.device)
         
-        # Assertions
-        # assert (h_index[:, [0]] == h_index).all() # Optional safety check
+        if r_index[:, 0].max() >= self.rel_embedding.num_embeddings:
+             print(f"CRASH PENDING: Rel Embedding Index {r_index[:, 0].max()} >= {self.rel_embedding.num_embeddings}")
 
         rel_embeds = self.rel_embedding(r_index[:, 0]) 
-        rel_embeds = rel_embeds.type(hidden_states.dtype) #+ rel_hidden_states
+        rel_embeds = rel_embeds.type(hidden_states.dtype)
 
         input_embeds, init_score = self.init_input_embeds(graph, hidden_states, h_index[:, 0], score_text_embs, all_index, rel_embeds)
         
@@ -244,66 +192,50 @@ class ConditionedPNA(PNA):
         return score
 
     def aggregate(self, graph, h_index, r_index, input_embeds, rel_embeds, init_score):
-        # Store context
         query = rel_embeds
         boundary, score = input_embeds, init_score
         hidden = boundary.clone()
         
-        # In PyG, we attach these to the Data object directly
         graph.query = query
         graph.boundary = boundary
         graph.hidden = hidden
         graph.score = score
         
-        # PyG equivalent of Range(graph.num_node)
         graph.node_id = torch.arange(graph.num_nodes, device=h_index.device)
         
-        # Calculate Degree
-        # Assuming undirected, so out_degree == degree
         graph.degree_out = degree(graph.edge_index[0], graph.num_nodes)
         graph.pna_degree_out = graph.degree_out
 
-        # PNA Degree Mean (mean of log(d+1))
         pna_degree_mean = (graph.degree_out + 1).log().mean()
 
-        for layer in self.layers:
-            # 1. Select Edges (returns 1D indices of edges to keep)
+        for i, layer in enumerate(self.layers):
+            print(f"DEBUG: Layer {i} | graph.score range: {graph.score.min()} to {graph.score.max()}")
             edge_id_subset = self.select_edges(graph, graph.score)
             
-            # 2. Create Compact Subgraph (Manual logic to preserve mappings)
             sub_edge_index = graph.edge_index[:, edge_id_subset]
             sub_edge_attr = graph.edge_attr[edge_id_subset] if graph.edge_attr is not None else None
             
-            # unique_nodes maps: 0..SubN -> Original_Graph_Node_ID
             unique_nodes, new_edge_index = sub_edge_index.unique(return_inverse=True)
             
             subgraph = Data(edge_index=new_edge_index, edge_attr=sub_edge_attr)
             subgraph.num_nodes = unique_nodes.size(0)
             
-            # Transfer attributes
             subgraph.score = graph.score[unique_nodes]
             subgraph.hidden = graph.hidden[unique_nodes]
             subgraph.degree_out = graph.degree_out[unique_nodes]
             subgraph.node_id = graph.node_id[unique_nodes]
             subgraph.pna_degree_mean = pna_degree_mean
             
-            # Prepare Layer Input
             layer_input = F.sigmoid(subgraph.score).unsqueeze(-1) * subgraph.hidden
             
-            # Layer Forward
             hidden_out = layer(subgraph, layer_input.type(torch.float32))
             
-            # 3. Scatter Updates back to original graph
             out_mask = subgraph.degree_out > 0
             
-            # Which nodes in the ORIGINAL graph do we update?
             active_original_ids = unique_nodes[out_mask]
             
-            # Update Hidden
             graph.hidden[active_original_ids] = (graph.hidden[active_original_ids] + hidden_out[out_mask]).type(graph.hidden.dtype)
 
-            # Update Scores
-            # Map original node IDs to their batch index to get the correct Query
             batch_idx = graph.batch[active_original_ids]
             
             new_scores = self.score(graph.hidden[active_original_ids], graph.query[batch_idx])
@@ -312,36 +244,15 @@ class ConditionedPNA(PNA):
         return graph.score
 
     def init_input_embeds(self, graph, head_embeds, head_index, tail_embeds, tail_index, rel_embeds):
-        # Using VirtualTensor
         input_embeds = VirtualTensor.zeros(graph.num_nodes, rel_embeds.shape[1], 
                                            device=rel_embeds.device, dtype=rel_embeds.dtype)
         
-        # Assuming tail_index matches PyG broadcast rules or is handled by VirtualTensor
-        # If VirtualTensor supports the original TorchDrug broadcasting logic, this line is fine:
         input_embeds[tail_index] = tail_embeds.type(head_embeds.dtype)
         input_embeds[head_index] = head_embeds
-
-        # Init Score
-        # Zero all scores
-        # We rely on VirtualTensor.gather or standard indexing
-        # Note: 'graph.node2graph' in TorchDrug is 'graph.batch' in PyG
-        
-        # Recreating logic: score = VirtualTensor.gather(..., graph.batch)
-        # Using standard PyG approach for the 'zero all' base:
-        # We create scores for ALL nodes based on the query of their respective graph
-        # query[graph.batch] expands Query [BatchSize, D] -> [NumNodes, D]
-        
-        # If you want to use VirtualTensor for scores too:
-        # score = VirtualTensor.gather(self.score(torch.zeros_like(rel_embeds), rel_embeds), graph.batch) 
-        # But standard tensor is likely safer here:
         
         expanded_query = rel_embeds[graph.batch]
         score_all = self.score(torch.zeros(graph.num_nodes, rel_embeds.shape[1], device=rel_embeds.device), expanded_query)
         
-        # Use VirtualTensor for the result if preferred, or standard tensor
-        # The original code returned a tensor for 'score'.
-        
-        # Update specific head scores
         score_all[head_index] = self.score(head_embeds, rel_embeds)
             
         return input_embeds, score_all
@@ -359,38 +270,30 @@ class ConditionedPNA(PNA):
         ks = (node_ratio * graph.num_nodes).long()
         es = (degree_ratio * ks * graph.num_edges / graph.num_nodes).long()
 
-        # PyG: Count per graph
         num_nodes_per_graph = bincount(graph.batch, minlength=graph.num_graphs)
         ks = torch.min(ks, num_nodes_per_graph)
         
-        # TopK Nodes
         index = variadic_topks(score, num_nodes_per_graph, ks=ks, break_tie=self.break_tie)[1]
         node_in = index 
         
-        # Count Edges for chosen nodes
-        # Create mask for source nodes
         src_mask = torch.zeros(graph.num_nodes, dtype=torch.bool, device=graph.device)
         src_mask[node_in] = True
         edge_mask_in = src_mask[graph.edge_index[0]]
         
-        # Edges per graph count
         edge_batch = graph.batch[graph.edge_index[0][edge_mask_in]]
         num_edges_per_graph = bincount(edge_batch, minlength=graph.num_graphs)
         
         es = torch.min(es, num_edges_per_graph)
 
-        # TopK Edges
         valid_edge_indices = torch.nonzero(edge_mask_in).squeeze()
         node_out = graph.edge_index[1][valid_edge_indices]
         score_edge = score[node_out]
         
         final_edge_indices = variadic_topks(score_edge, num_edges_per_graph, ks=es, break_tie=self.break_tie)[1]
         
-        # Return Global Edge IDs
         return valid_edge_indices[final_edge_indices]
     
     def remove_easy_edges(self, graph, h_index, t_index, r_index):
-        # PyG Version: Uses vectorized hashing instead of loop
         if graph.edge_attr is None:
              raise ValueError("Graph must have edge_attr (relation IDs) for remove_easy_edges")
 
@@ -402,11 +305,9 @@ class ConditionedPNA(PNA):
             h_ext = torch.cat([h_index, t_index], dim=0)
             t_ext = torch.cat([t_index, h_index], dim=0)
             
-            # Hash (h, t)
             graph_hashes = graph.edge_index[0].long() * num_nodes + graph.edge_index[1].long()
             batch_hashes = h_ext.long() * num_nodes + t_ext.long()
         else:
-            # Hash (h, t, r)
             graph_hashes = (graph.edge_index[0].long() * num_nodes + graph.edge_index[1].long()) * num_rels + edge_rels.long()
             batch_hashes = (h_index.long() * num_nodes + t_index.long()) * num_rels + r_index.long()
 
