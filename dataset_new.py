@@ -39,7 +39,7 @@ class InductiveKnowledgeGraphDataset(Dataset):
     def _create_pyg_graph(self, triplets, num_nodes, num_relations):
         if len(triplets) == 0:
             return Data(edge_index=torch.empty((2, 0), dtype=torch.long),
-                        edge_type=torch.empty(0, dtype=torch.long),
+                        edge_attr=torch.empty(0, dtype=torch.long),
                         num_nodes=num_nodes)
             
         tensor_triplets = torch.tensor(triplets, dtype=torch.long)
