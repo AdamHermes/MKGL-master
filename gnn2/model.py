@@ -8,7 +8,7 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.utils import to_undirected, degree
 
 # Local Utils (Assumed available)
-from .util import VirtualTensor, Range, bincount, variadic_topks
+from .util import VirtualTensor, bincount, variadic_topks
 # Note: RepeatGraph is usually replaced by PyG's Batch.from_data_list([g]*n)
 # but if you have a custom RepeatGraph for PyG, you can import it.
 
