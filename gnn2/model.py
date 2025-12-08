@@ -140,7 +140,7 @@ class ConditionedPNA(PNA):
     def forward(self, h_index, r_index, t_index, hidden_states, rel_hidden_states, graph, score_text_embs, all_index):
         print(f"DEBUG: START FORWARD | h_max={h_index.max()} t_max={t_index.max()} r_max={r_index.max()}")
         print(f"DEBUG: GRAPH STATS | num_nodes={graph.num_nodes} edge_index_max={graph.edge_index.max()} edge_attr_max={graph.edge_attr.max() if graph.edge_attr is not None else 'None'}")
-        
+        graph = graph.clone()
         if r_index.max() >= self.num_relation * 2:
             print(f"CRASH PENDING: r_index {r_index.max()} >= limit {self.num_relation * 2}")
         print("Got1")
@@ -151,7 +151,15 @@ class ConditionedPNA(PNA):
         if max_id >= graph.num_nodes:
             print(f"CRASH PENDING: Max Node ID ({max_id}) >= graph.num_nodes ({graph.num_nodes})")
             graph.num_nodes = max_id + 1
-
+        if graph.edge_index.min() < 0:
+            print(f"CRASH CAUSE: edge_index contains negative values! Min: {graph.edge_index.min()}")
+            
+        if graph.edge_attr is not None:
+            if graph.edge_attr.min() < 0:
+                print(f"CRASH CAUSE: edge_attr contains negative values! Min: {graph.edge_attr.min()}")
+            
+            if graph.edge_index.size(1) != graph.edge_attr.size(0):
+                print(f"CRASH CAUSE: Shape Mismatch! edge_index cols={graph.edge_index.size(1)} vs edge_attr rows={graph.edge_attr.size(0)}")
         if graph.edge_attr is not None:
             print("Got3")
             if graph.edge_attr.max() >= self.num_relation:
@@ -267,30 +275,75 @@ class ConditionedPNA(PNA):
         node_ratio = self.node_ratio if self.training else self.test_node_ratio
         degree_ratio = self.degree_ratio if self.training else self.test_degree_ratio
         
-        ks = (node_ratio * graph.num_nodes).long()
-        es = (degree_ratio * ks * graph.num_edges / graph.num_nodes).long()
-
+        # 1. Calculate Node Limits Per Graph (Vectorized)
+        # We need counts for each graph in the batch
         num_nodes_per_graph = bincount(graph.batch, minlength=graph.num_graphs)
-        ks = torch.min(ks, num_nodes_per_graph)
         
+        # Calculate 'ks' (nodes to keep) for each graph individually
+        # Shape: [Batch_Size]
+        ks = (num_nodes_per_graph.float() * node_ratio).long()
+        ks = torch.clamp(ks, min=1) # Ensure at least 1 node kept per graph
+        
+        # We don't need torch.min(ks, num_nodes) here because the ratio math guarantees
+        # ks <= num_nodes (unless ratio > 1). But for safety/consistency:
+        ks = torch.min(ks, num_nodes_per_graph)
+
+        # 2. Select Top-K Nodes
+        # variadic_topks expects 'ks' to be a Tensor of shape [Batch_Size]
         index = variadic_topks(score, num_nodes_per_graph, ks=ks, break_tie=self.break_tie)[1]
         node_in = index 
         
-        src_mask = torch.zeros(graph.num_nodes, dtype=torch.bool, device=graph.device)
+        # 3. Mask Sources
+        src_mask = torch.zeros(graph.num_nodes, dtype=torch.bool, device=graph.edge_index.device)
         src_mask[node_in] = True
+        
+        # Find edges starting from selected nodes
         edge_mask_in = src_mask[graph.edge_index[0]]
         
+        # 4. Calculate Edge Limits Per Graph
+        # Identify which graph each valid edge belongs to
         edge_batch = graph.batch[graph.edge_index[0][edge_mask_in]]
         num_edges_per_graph = bincount(edge_batch, minlength=graph.num_graphs)
         
+        # Calculate 'es' (edges to keep) based on the *actual* edges found
+        # Formula: degree_ratio * nodes_kept * average_degree
+        # Note: We approximate average degree here or use the ratio directly
+        
+        # Improved Logic: Use the ratio relative to the edges found connected to active nodes
+        # Original formula adaptation:
+        # es = (degree_ratio * ks * total_edges / total_nodes) -> This was scalar
+        
+        # Vectorized adaptation:
+        # es = degree_ratio * (ks / nodes_per_graph) * edges_per_graph
+        # effectively: es = degree_ratio * node_ratio * edges_per_graph
+        # But sticking closer to your original intent:
+        
+        # Calculate max edges allowed per graph
+        es = (degree_ratio * ks.float() * (graph.num_edges / graph.num_nodes)).long()
+        es = torch.clamp(es, min=1)
+        
+        # Ensure 'es' tensor matches the size of 'num_edges_per_graph' 
+        # (Handle case where some graphs might have 0 valid edges)
+        if es.size(0) != num_edges_per_graph.size(0):
+             # This happens if edge_batch doesn't cover all graphs
+             # We must align 'es' to 'num_edges_per_graph'
+             es_aligned = torch.zeros_like(num_edges_per_graph)
+             # Fill based on graph indices available, or just recalculate 'es' using full batch stats
+             # Simpler approach: Recalculate 'es' entirely using batch-wise stats
+             es = (degree_ratio * ks.float() * (num_edges_per_graph.float() / num_nodes_per_graph.float().clamp(min=1))).long()
+             es = torch.clamp(es, min=1)
+
+        # Apply limit: cannot select more edges than exist
         es = torch.min(es, num_edges_per_graph)
 
+        # 5. Select Top-K Edges
         valid_edge_indices = torch.nonzero(edge_mask_in).squeeze()
         node_out = graph.edge_index[1][valid_edge_indices]
         score_edge = score[node_out]
         
         final_edge_indices = variadic_topks(score_edge, num_edges_per_graph, ks=es, break_tie=self.break_tie)[1]
         
+        # Map back to global edge indices
         return valid_edge_indices[final_edge_indices]
     
     def remove_easy_edges(self, graph, h_index, t_index, r_index):
