@@ -138,43 +138,30 @@ class ConditionedPNA(PNA):
 
 
     def forward(self, h_index, r_index, t_index, hidden_states, rel_hidden_states, graph, score_text_embs, all_index):
-        print(f"DEBUG: START FORWARD | h_max={h_index.max()} t_max={t_index.max()} r_max={r_index.max()}")
-        print(f"DEBUG: GRAPH STATS | num_nodes={graph.num_nodes} edge_index_max={graph.edge_index.max()} edge_attr_max={graph.edge_attr.max() if graph.edge_attr is not None else 'None'}")
         graph = graph.clone()
         if r_index.max() >= self.num_relation * 2:
-            print(f"CRASH PENDING: r_index {r_index.max()} >= limit {self.num_relation * 2}")
-        print("Got1")
+            raise ValueError(f"r_index {r_index.max()} >= limit {self.num_relation * 2}")
+        
         if self.training:
             graph = self.remove_easy_edges(graph, h_index, t_index, r_index)
-        print("Got2")
+        
         max_id = graph.edge_index.max().item()
         if max_id >= graph.num_nodes:
-            print(f"CRASH PENDING: Max Node ID ({max_id}) >= graph.num_nodes ({graph.num_nodes})")
             graph.num_nodes = max_id + 1
         if graph.edge_index.min() < 0:
-            print(f"CRASH CAUSE: edge_index contains negative values! Min: {graph.edge_index.min()}")
+            raise ValueError(f"edge_index contains negative values! Min: {graph.edge_index.min()}")
             
         if graph.edge_attr is not None:
             if graph.edge_attr.min() < 0:
-                print(f"CRASH CAUSE: edge_attr contains negative values! Min: {graph.edge_attr.min()}")
+                raise ValueError(f"edge_attr contains negative values! Min: {graph.edge_attr.min()}")
             
             if graph.edge_index.size(1) != graph.edge_attr.size(0):
-                print(f"CRASH CAUSE: Shape Mismatch! edge_index cols={graph.edge_index.size(1)} vs edge_attr rows={graph.edge_attr.size(0)}")
-        if graph.edge_attr is not None:
-            print("Got3")
-            if graph.edge_attr.max() >= self.num_relation:
-                print(f"WARNING: edge_attr max {graph.edge_attr.max()} >= num_relation {self.num_relation} before undirected")
-            try:
-                edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr, num_nodes=graph.num_nodes)
-                graph.edge_attr = edge_attr
-            except RuntimeError as e:
-                print(f"CRASH IN TO_UNDIRECTED: {e}")
-                print(f"State: nodes={graph.num_nodes}, edge_index_shape={graph.edge_index.shape}, edge_attr_shape={graph.edge_attr.shape}")
-                raise e
+                raise ValueError(f"Shape Mismatch! edge_index cols={graph.edge_index.size(1)} vs edge_attr rows={graph.edge_attr.size(0)}")
+            
+            edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr, num_nodes=graph.num_nodes)
+            graph.edge_attr = edge_attr
         else:
-            print("Got4")
             edge_index = to_undirected(graph.edge_index, num_nodes=graph.num_nodes)
-            print("Got5")
         graph.edge_index = edge_index
 
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
@@ -188,7 +175,7 @@ class ConditionedPNA(PNA):
         t_index = t_index + node_counts.unsqueeze(-1).to(t_index.device)
         
         if r_index[:, 0].max() >= self.rel_embedding.num_embeddings:
-             print(f"CRASH PENDING: Rel Embedding Index {r_index[:, 0].max()} >= {self.rel_embedding.num_embeddings}")
+            raise ValueError(f"Rel Embedding Index {r_index[:, 0].max()} >= {self.rel_embedding.num_embeddings}")
 
         rel_embeds = self.rel_embedding(r_index[:, 0]) 
         rel_embeds = rel_embeds.type(hidden_states.dtype)
@@ -217,7 +204,6 @@ class ConditionedPNA(PNA):
         pna_degree_mean = (graph.degree_out + 1).log().mean()
 
         for i, layer in enumerate(self.layers):
-            print(f"DEBUG: Layer {i} | graph.score range: {graph.score.min()} to {graph.score.max()}")
             edge_id_subset = self.select_edges(graph, graph.score)
             
             sub_edge_index = graph.edge_index[:, edge_id_subset]
@@ -258,12 +244,13 @@ class ConditionedPNA(PNA):
         input_embeds[tail_index] = tail_embeds.type(head_embeds.dtype)
         input_embeds[head_index] = head_embeds
         
-        expanded_query = rel_embeds[graph.batch]
-        score_all = self.score(torch.zeros(graph.num_nodes, rel_embeds.shape[1], device=rel_embeds.device), expanded_query)
-        
-        score_all[head_index] = self.score(head_embeds, rel_embeds)
+        # Broadcast rel_embeds-based scores to all nodes in each graph of the batch
+        # graph.batch maps each node to its graph index in the batch
+        score_base = self.score(torch.zeros_like(rel_embeds), rel_embeds)  # [batch_size]
+        score = score_base[graph.batch]  # Broadcast to [num_nodes] using batch assignment
+        score[head_index] = self.score(head_embeds, rel_embeds)
             
-        return input_embeds, score_all
+        return input_embeds, score
 
     def score(self, hidden, rel_embeds):
         heuristic = self.linear(torch.cat([hidden, rel_embeds], dim=-1))
