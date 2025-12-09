@@ -24,8 +24,6 @@ class MKGL(LlamaForCausalLM):
     def __init__(self, config):
         super().__init__(config)
 
-    # ERROR SOURCE 1: Missing num_relations
-    # You MUST accept num_relations here to pass it to ScoreRetriever
     def init_kg_specs(self, kgl2token, orig_vocab_size, cfg): 
         self.kgl2token = kgl2token
         self.orig_vocab_size = orig_vocab_size
@@ -67,10 +65,6 @@ class MKGL(LlamaForCausalLM):
         
         batch_size = h_kgl_tokenid.shape[0]
         device = self.lm_head.weight.device
-
-        # DEBUG CHECK: Graph Consistency
-        if h_id.max() >= graph.num_nodes or t_id.max() >= graph.num_nodes:
-            print(f"CRASH PENDING in MKGL: Batch Ent ID {max(h_id.max(), t_id.max())} >= Graph Num Nodes {graph.num_nodes}")
 
         mask = input_ids < self.orig_vocab_size
         token_embs = self.get_input_embeddings()(input_ids[mask])
@@ -194,20 +188,10 @@ class KGL4KGC(nn.Module):
     
     def predict(self, batch, all_loss=None, metric=None):
         pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
-        
-        # ERROR SOURCE 2: Checking for Bad Relations
-        if pos_r_index.max() >= self.num_relation:
-            print(f"CRITICAL ERROR: Input r_id {pos_r_index.max()} >= num_relations {self.num_relation}")
-            # Optional: Clamp to avoid crash temporarily
-            # pos_r_index = torch.clamp(pos_r_index, max=self.num_relation-1)
 
         device = pos_h_index.device
         batch_size = len(batch.h_id)
         graph = self.get_graph(batch).to(device)
-        
-        # ERROR SOURCE 3: Checking Graph Size
-        if graph.num_nodes <= pos_h_index.max() or graph.num_nodes <= pos_t_index.max():
-             print(f"CRITICAL ERROR: Graph too small! Num Nodes: {graph.num_nodes}, Max Entity ID in Batch: {max(pos_h_index.max(), pos_t_index.max())}")
 
         all_index = torch.arange(graph.num_nodes, device=device)
         all_kgl_index = self.id2tokenid(all_index, split=batch.split)
@@ -274,10 +258,6 @@ class KGL4KGC(nn.Module):
 
         t_truth_index = t_all[edge_idx_t]
         
-        # DEBUG CHECK FOR TARGET MASK
-        if t_truth_index.numel() > 0 and t_truth_index.max() >= num_nodes:
-             print(f"CRITICAL ERROR in target(): t_truth_index {t_truth_index.max()} >= num_nodes {num_nodes}")
-
         pos_index = torch.repeat_interleave(num_t_truth)
         t_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
         t_mask[pos_index, t_truth_index] = 0
