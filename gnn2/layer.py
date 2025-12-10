@@ -29,7 +29,9 @@ class MLP(nn.Module):
                 
                 if dropout > 0:
                     layers.append(nn.Dropout(dropout))
-            
+            else:
+                # FINAL LAYER: Add Tanh to bound output to [-1, 1]
+                layers.append(nn.Tanh())
             current_dim = hidden_dim
             
         self.mlp = nn.Sequential(*layers)
@@ -159,12 +161,16 @@ class PNALayer(MessagePassing):
         scale = scale / pna_degree_mean
         
         # Scales: [N, 1, 3] -> (1, scale, 1/scale)
-        scales = torch.cat([torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)
-        
+
         # --- D. Apply Scaling ---
         # [N, D, 4, 1] * [N, 1, 1, 3] -> [N, D, 4, 3] -> Flatten -> [N, D*12]
-        update = (features.unsqueeze(-1) * scales.unsqueeze(-2)).flatten(-2).flatten(-1)
-        
+        scales = torch.cat([torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)
+        scales = scales.unsqueeze(1)  # [N, 1, 3]
+
+        # Multiply and flatten properly
+        update = (features.unsqueeze(-1) * scales.unsqueeze(-2))  # [N, D, 4, 3]
+        update = update.reshape(update.size(0), update.size(1), -1)  # [N, D, 12]
+        update = update.flatten(1)  # [N, D*12]
         return update
 
     def combine(self, input, update):

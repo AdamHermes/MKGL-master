@@ -105,21 +105,12 @@ class ConditionedPNA(PNA):
             if graph.edge_index.size(1) != graph.edge_attr.size(0):
                 print(f"CRASH CAUSE: Shape Mismatch! edge_index cols={graph.edge_index.size(1)} vs edge_attr rows={graph.edge_attr.size(0)}")
         if graph.edge_attr is not None:
-            print("Got3")
-            if graph.edge_attr.max() >= self.num_relation:
-                print(f"WARNING: edge_attr max {graph.edge_attr.max()} >= num_relation {self.num_relation} before undirected")
-            try:
-                edge_index, edge_attr = to_undirected(graph.edge_index, graph.edge_attr, num_nodes=graph.num_nodes)
-                graph.edge_attr = edge_attr
-            except RuntimeError as e:
-                print(f"CRASH IN TO_UNDIRECTED: {e}")
-                print(f"State: nodes={graph.num_nodes}, edge_index_shape={graph.edge_index.shape}, edge_attr_shape={graph.edge_attr.shape}")
-                raise e
-        else:
-            print("Got4")
-            edge_index = to_undirected(graph.edge_index, num_nodes=graph.num_nodes)
-            print("Got5")
-        graph.edge_index = edge_index
+            # Create reverse edges with num_relation offset
+            reverse_edge_index = torch.stack([graph.edge_index[1], graph.edge_index[0]], dim=0)
+            reverse_edge_attr = graph.edge_attr + self.num_relation  # Shift for reverse direction
+            
+            graph.edge_index = torch.cat([graph.edge_index, reverse_edge_index], dim=1)
+            graph.edge_attr = torch.cat([graph.edge_attr, reverse_edge_attr], dim=0)
 
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
         
@@ -202,6 +193,9 @@ class ConditionedPNA(PNA):
             subgraph.score = graph.score[unique_nodes]
             subgraph.hidden = graph.hidden[unique_nodes]
             subgraph.degree_out = graph.degree_out[unique_nodes]
+            subgraph.query = graph.query[graph.batch[unique_nodes]]
+            subgraph.batch = graph.batch[unique_nodes]
+            subgraph.pna_degree_out = subgraph.degree_out
             subgraph.node_id = graph.node_id[unique_nodes]
             subgraph.pna_degree_mean = pna_degree_mean
             
@@ -278,15 +272,22 @@ class ConditionedPNA(PNA):
         return input_embeds_full, score_all
 
     def score(self, hidden, rel_embeds):
-        heuristic = self.linear(torch.cat([hidden, rel_embeds], dim=-1))
-        x = hidden * heuristic
-        raw_score = self.mlp(x).squeeze(-1)
-        if raw_score.abs().max() > 50 or torch.isnan(raw_score).any():
-            print("  DEBUG: score() internal tracking:")
-            print_stat("    score input: hidden", hidden)
-            print_stat("    score input: heuristic", heuristic)
-            print_stat("    score input: x (hidden*heuristic)", x)
-            print_stat("    score output", raw_score)
+        # Normalize inputs
+        hidden_norm = F.normalize(hidden, p=2, dim=-1)
+        rel_norm = F.normalize(rel_embeds, p=2, dim=-1)
+        
+        # Concatenate
+        combined = torch.cat([hidden_norm, rel_norm], dim=-1)
+        heuristic = self.linear(combined)
+        heuristic = F.normalize(heuristic, p=2, dim=-1)
+        
+        # Element-wise multiplication on normalized tensors
+        x = hidden_norm * heuristic
+        
+        # MLP produces output, then scale it
+        raw_score = self.mlp(x).squeeze(-1)  # Should be bounded now
+        raw_score = raw_score * 10  # Scale to [-10, 10] range
+        
         return raw_score
 
     def select_edges(self, graph, score):
@@ -368,3 +369,4 @@ class ConditionedPNA(PNA):
         new_t_index = torch.where(is_t_neg, t_index, h_index)
         new_r_index = torch.where(is_t_neg, r_index, r_index + self.num_relation)
         return new_h_index, new_t_index, new_r_index
+    
