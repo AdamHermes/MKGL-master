@@ -433,11 +433,17 @@ if __name__ == "__main__":
     # Load Config
     with open(args.config, "r") as f:
         cfg = easydict.EasyDict(yaml.safe_load(f))
-        if 'ind' in args.config:
-            if args.version:
-                cfg.dataset.version = args.version
-            else:
-                print("Warning: Inductive config used but no version specified. Using full dataset.")
+        
+        # Apply version from command line args if provided
+        if args.version:
+            cfg.dataset.version = args.version
+        elif 'ind' in args.config:
+            # Only warn for inductive configs when no version specified
+            print("Warning: Inductive config used but no version specified. Using full dataset.")
+            cfg.dataset.version = ''
+        else:
+            # For non-inductive configs, default to empty string if not in config
+            if not hasattr(cfg.dataset, 'version'):
                 cfg.dataset.version = ''
 
     # Set Config Name
