@@ -433,28 +433,36 @@ if __name__ == "__main__":
     # Load Config
     with open(args.config, "r") as f:
         cfg = easydict.EasyDict(yaml.safe_load(f))
-        if 'ind' in args.config:
-            if args.version:
-                cfg.dataset.version = args.version
-            else:
-                print("Warning: Inductive config used but no version specified. Defaulting to 'v1'.")
-                cfg.dataset.version = 'v1'
+        
+        # Apply version from command line args if provided
+        if args.version:
+            print(f"Using version from command line: '{args.version}'")
+            cfg.dataset.version = args.version
+        elif 'ind' in args.config:
+            # Only warn for inductive configs when no version specified
+            print("Warning: Inductive config used but no version specified. Using full dataset.")
+            cfg.dataset.version = ''
+        else:
+            # For non-inductive configs, default to empty string if not in config
+            if not hasattr(cfg.dataset, 'version'):
+                cfg.dataset.version = ''
 
     # Set Config Name
     config_name = args.config.split('/')[-1].split('.')[0]
-    if hasattr(cfg.dataset, 'version'):
+    if hasattr(cfg.dataset, 'version') and cfg.dataset.version:
         config_name += '_' + cfg.dataset.version
     args.config_name = config_name
 
     print('***************Read dataset from PyG (Migrated)***************')
     print("Config file: %s" % args.config)
     print("Config name: %s" % args.config_name)
+    print("Dataset version: %s" % cfg.dataset.get('version', 'NOT SET'))
     import pprint
     pprint.pprint(cfg)
     
     # Instantiate Dataset (Replaces TorchDrug core.Configurable)
     dataset_class_str = cfg.dataset.get('class', '')
-    dataset_version = cfg.dataset.get('version', 'v1')
+    dataset_version = cfg.dataset.get('version', '')
     
     kgdata = None
     # Inductive Check

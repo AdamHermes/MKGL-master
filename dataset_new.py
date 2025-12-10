@@ -319,14 +319,24 @@ class FB15k237(StandardKGCDataset):
         if not os.path.exists(path): os.makedirs(path)
         
         files = []
-        for url in self.urls:
-            url = url % version
-            save_file = f"fb15k237_{version}_{os.path.basename(url)}"
-            txt_file = os.path.join(path, save_file)
-            if not os.path.exists(txt_file):
-                print(f"Downloading {url}...")
-                download_url(url, path, filename=save_file)
-            files.append(txt_file)
+        if version == "" or version is None:
+            # Use full dataset files (no version suffix)
+            for filename in ["train.txt", "valid.txt", "test.txt"]:
+                save_file = f"fb15k237_{filename}"
+                txt_file = os.path.join(path, save_file)
+                if not os.path.exists(txt_file):
+                    raise FileNotFoundError(f"Full dataset file not found: {txt_file}")
+                files.append(txt_file)
+        else:
+            # Use versioned files with download if needed
+            for url in self.urls:
+                url = url % version
+                save_file = f"fb15k237_{version}_{os.path.basename(url)}"
+                txt_file = os.path.join(path, save_file)
+                if not os.path.exists(txt_file):
+                    print(f"Downloading {url}...")
+                    download_url(url, path, filename=save_file)
+                files.append(txt_file)
 
         self.load_standard_tsvs(files, verbose=verbose)
 
@@ -343,13 +353,23 @@ class WN18RR(StandardKGCDataset):
         if not os.path.exists(path): os.makedirs(path)
         
         files = []
-        for url in self.urls:
-            url = url % version
-            save_file = f"wn18rr_{version}_{os.path.basename(url)}"
-            txt_file = os.path.join(path, save_file)
-            if not os.path.exists(txt_file):
-                print(f"Downloading {url}...")
-                download_url(url, path, filename=save_file)
-            files.append(txt_file)
+        if version == "" or version is None:
+            # Use full dataset files (no version suffix)
+            for filename in ["train.txt", "valid.txt", "test.txt"]:
+                save_file = f"wn18rr_{filename}"
+                txt_file = os.path.join(path, save_file)
+                if not os.path.exists(txt_file):
+                    raise FileNotFoundError(f"Full dataset file not found: {txt_file}")
+                files.append(txt_file)
+        else:
+            # Use versioned files with download if needed
+            for url in self.urls:
+                url = url % version
+                save_file = f"wn18rr_{version}_{os.path.basename(url)}"
+                txt_file = os.path.join(path, save_file)
+                if not os.path.exists(txt_file):
+                    print(f"Downloading {url}...")
+                    download_url(url, path, filename=save_file)
+                files.append(txt_file)
 
         self.load_standard_tsvs(files, verbose=verbose)
