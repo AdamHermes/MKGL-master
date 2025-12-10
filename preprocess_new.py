@@ -437,7 +437,7 @@ if __name__ == "__main__":
             if args.version:
                 cfg.dataset.version = args.version
             else:
-                print("Warning: Inductive config used but no version specified. Defaulting to 'v1'.")
+                print("Warning: Inductive config used but no version specified. default v1.")
                 cfg.dataset.version = 'v1'
 
     # Set Config Name
@@ -454,7 +454,7 @@ if __name__ == "__main__":
     
     # Instantiate Dataset (Replaces TorchDrug core.Configurable)
     dataset_class_str = cfg.dataset.get('class', '')
-    dataset_version = cfg.dataset.get('version', 'v1')
+    dataset_version = cfg.dataset.get('version', '')
     
     kgdata = None
     # Inductive Check
