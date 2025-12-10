@@ -180,7 +180,9 @@ class ConditionedPNA(PNA):
             
             subgraph = Data(edge_index=new_edge_index, edge_attr=sub_edge_attr)
             subgraph.num_nodes = unique_nodes.size(0)
+            subgraph.query = graph.query
             
+            subgraph.batch = graph.batch[unique_nodes]
             subgraph.score = graph.score[unique_nodes]
             subgraph.hidden = graph.hidden[unique_nodes]
             subgraph.degree_out = graph.degree_out[unique_nodes]
