@@ -436,6 +436,7 @@ if __name__ == "__main__":
         
         # Apply version from command line args if provided
         if args.version:
+            print(f"Using version from command line: '{args.version}'")
             cfg.dataset.version = args.version
         elif 'ind' in args.config:
             # Only warn for inductive configs when no version specified
@@ -448,13 +449,14 @@ if __name__ == "__main__":
 
     # Set Config Name
     config_name = args.config.split('/')[-1].split('.')[0]
-    if hasattr(cfg.dataset, 'version'):
+    if hasattr(cfg.dataset, 'version') and cfg.dataset.version:
         config_name += '_' + cfg.dataset.version
     args.config_name = config_name
 
     print('***************Read dataset from PyG (Migrated)***************')
     print("Config file: %s" % args.config)
     print("Config name: %s" % args.config_name)
+    print("Dataset version: %s" % cfg.dataset.get('version', 'NOT SET'))
     import pprint
     pprint.pprint(cfg)
     
