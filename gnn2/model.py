@@ -173,19 +173,35 @@ class ConditionedPNA(PNA):
             
             edge_id_subset = self.select_edges(graph, graph.score)
             
+            # ... inside your aggregate loop ...
+            
             sub_edge_index = graph.edge_index[:, edge_id_subset]
             sub_edge_attr = graph.edge_attr[edge_id_subset] if graph.edge_attr is not None else None
             
+            # --- INSERT THIS DEBUG BLOCK ---
+            if sub_edge_attr is not None:
+                max_val = sub_edge_attr.max().item()
+                limit = self.num_relation * 2
+                print(f"DEBUG: Layer {i} | Edge Attr Max: {max_val} | Limit: {limit}")
+                
+                if max_val >= limit:
+                    # This print proves the config is the issue, not the subgraph code
+                    print(f"!!! CRASH DETECTED !!!")
+                    print(f"You have a Relation ID {max_val} but only configured {limit} slots.")
+                    print(f"Your 'sub_edge_attr' logic is correct, but the DATA is out of bounds.")
+                    # We exit explicitly to avoid the confusing CUDA error
+                    import sys; sys.exit(1)
+            # -------------------------------
+
             unique_nodes, new_edge_index = sub_edge_index.unique(return_inverse=True)
+            # ... continue ...
             
             subgraph = Data(edge_index=new_edge_index, edge_attr=sub_edge_attr)
             subgraph.num_nodes = unique_nodes.size(0)
-            subgraph.query = graph.query
             
-            subgraph.batch = graph.batch[unique_nodes]
             subgraph.score = graph.score[unique_nodes]
             subgraph.hidden = graph.hidden[unique_nodes]
-            subgraph.pna_degree_out = graph.degree_out[unique_nodes]
+            subgraph.degree_out = graph.degree_out[unique_nodes]
             subgraph.node_id = graph.node_id[unique_nodes]
             subgraph.pna_degree_mean = pna_degree_mean
             

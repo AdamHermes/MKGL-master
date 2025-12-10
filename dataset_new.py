@@ -26,11 +26,11 @@ class InductiveKnowledgeGraphDataset(Dataset):
         # Counts (Initialize to 0)
         self._num_transductive_nodes = 0
         self._num_inductive_nodes = 0
-        self._num_relations = 0
+        self.num_relation = 0
 
     @property
     def num_relation(self):
-        return self._num_relations
+        return self.num_relation
         
     @property
     def num_entity(self):
@@ -132,7 +132,7 @@ class InductiveKnowledgeGraphDataset(Dataset):
 
         self._num_transductive_nodes = len(self.transductive_vocab)
         self._num_inductive_nodes = len(self.inductive_vocab)
-        self._num_relations = len(self.relation_vocab)
+        self.num_relation = len(self.relation_vocab)
 
         # 4. Create Graphs
         idx_trans_train = num_samples[0]
@@ -141,16 +141,16 @@ class InductiveKnowledgeGraphDataset(Dataset):
         idx_ind_train_end = sum(num_samples[:4])
         
         self.fact_graph = self._create_pyg_graph(
-            triplets[:idx_trans_train], self._num_transductive_nodes, self._num_relations
+            triplets[:idx_trans_train], self._num_transductive_nodes, self.num_relation
         )
         self.graph = self._create_pyg_graph(
-            triplets[:idx_trans_all], self._num_transductive_nodes, self._num_relations
+            triplets[:idx_trans_all], self._num_transductive_nodes, self.num_relation
         )
         self.inductive_fact_graph = self._create_pyg_graph(
-            triplets[idx_ind_train_start:idx_ind_train_end], self._num_inductive_nodes, self._num_relations
+            triplets[idx_ind_train_start:idx_ind_train_end], self._num_inductive_nodes, self.num_relation
         )
         self.inductive_graph = self._create_pyg_graph(
-            triplets[idx_ind_train_start:], self._num_inductive_nodes, self._num_relations
+            triplets[idx_ind_train_start:], self._num_inductive_nodes, self.num_relation
         )
 
         slice_1 = triplets[:sum(num_samples[:2])] 
@@ -217,13 +217,13 @@ class StandardKGCDataset(InductiveKnowledgeGraphDataset):
         self.inductive_vocab = [] 
         
         self._num_transductive_nodes = len(self.transductive_vocab)
-        self._num_relations = len(self.relation_vocab)
+        self.num_relation = len(self.relation_vocab)
 
         self.fact_graph = self._create_pyg_graph(
-            triplets[:num_samples[0]], self._num_transductive_nodes, self._num_relations
+            triplets[:num_samples[0]], self._num_transductive_nodes, self.num_relation
         )
         self.graph = self._create_pyg_graph(
-            triplets, self._num_transductive_nodes, self._num_relations
+            triplets, self._num_transductive_nodes, self.num_relation
         )
         # No inductive graphs
         self.inductive_fact_graph = None
