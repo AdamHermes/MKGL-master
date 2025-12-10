@@ -185,7 +185,7 @@ class ConditionedPNA(PNA):
             subgraph.batch = graph.batch[unique_nodes]
             subgraph.score = graph.score[unique_nodes]
             subgraph.hidden = graph.hidden[unique_nodes]
-            subgraph.degree_out = graph.degree_out[unique_nodes]
+            subgraph.pna_degree_out = graph.degree_out[unique_nodes]
             subgraph.node_id = graph.node_id[unique_nodes]
             subgraph.pna_degree_mean = pna_degree_mean
             
