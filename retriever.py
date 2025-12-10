@@ -3,6 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 #from torchdrug import core
 from gnn2.model import *
+from gnn2.layer import PNALayer
 
 
 
@@ -121,7 +122,9 @@ class ScoreRetriever(BasePNARetriever):
             num_relation=cfg_kg.num_relation,            # PASSED FROM DATASET
             query_input_dim=cfg_base.query_input_dim,
             message_func=cfg_base.get("message_func", "distmult"),
-            layer_norm=cfg_base.get("layer_norm", False)
+            aggregate_func=cfg_base.get("aggregate_func", "pna"),
+            layer_norm=cfg_base.get("layer_norm", True),
+            dependent=cfg_base.get("dependent", True)
         )
         
         # 3. Initialize ConditionedPNA

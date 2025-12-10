@@ -1,10 +1,8 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch_scatter import scatter_add, scatter
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import to_undirected, degree
-from torch_geometric.nn import MessagePassing
 from .util import VirtualTensor, bincount, variadic_topks
 
 def print_stat(name, tensor):
@@ -60,68 +58,7 @@ class PNA(nn.Module):
         return output
 
 
-class PNALayer(MessagePassing):
-    def __init__(self, input_dim, output_dim, num_relation, query_input_dim=None, 
-                 message_func="distmult", layer_norm=False, **kwargs):
-        super().__init__(aggr=None, node_dim=0) 
-        
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.num_relation = num_relation 
-        self.message_func = message_func
-        
-        self.aggregators = ["mean", "max", "min", "std"]
-        self.scalers = ["identity", "amplification", "attenuation"]
-        
-        self.relation_linear = nn.Linear(input_dim, input_dim)
-        
-        total_dim = input_dim * len(self.aggregators) * len(self.scalers)
-        self.mlp = nn.Sequential(
-            nn.Linear(total_dim, output_dim),
-            nn.ReLU(),
-            nn.Linear(output_dim, output_dim)
-        )
-        
-        if layer_norm:
-            self.layer_norm = nn.LayerNorm(output_dim)
-        else:
-            self.layer_norm = None
 
-    def forward(self, graph, input):
-        edge_index = graph.edge_index
-        edge_attr = graph.edge_attr 
-        out = self.propagate(edge_index, x=input, edge_attr=edge_attr)
-        
-        if self.layer_norm:
-            out = self.layer_norm(out)
-        return out
-
-    def message(self, x_j, edge_attr):
-        msg = self.relation_linear(x_j) 
-        return msg
-
-    def aggregate(self, inputs, index, dim_size=None):
-        outs = []
-        for aggr in self.aggregators:
-            if aggr == "mean":
-                out = scatter(inputs, index, dim=0, dim_size=dim_size, reduce="mean")
-            elif aggr == "max":
-                out = scatter(inputs, index, dim=0, dim_size=dim_size, reduce="max")
-            elif aggr == "min":
-                out = scatter(inputs, index, dim=0, dim_size=dim_size, reduce="min")
-            elif aggr == "std":
-                mean = scatter(inputs, index, dim=0, dim_size=dim_size, reduce="mean")
-                sq_diff = (inputs - mean[index])**2
-                var = scatter(sq_diff, index, dim=0, dim_size=dim_size, reduce="mean")
-                out = torch.sqrt(var + 1e-6)
-            outs.append(out)
-            
-        out = torch.cat(outs, dim=-1)
-        out = torch.cat([out] * len(self.scalers), dim=-1)
-        return out
-    
-    def update(self, inputs):
-        return self.mlp(inputs)
 
 
 class ConditionedPNA(PNA):
