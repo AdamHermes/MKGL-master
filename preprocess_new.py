@@ -437,8 +437,8 @@ if __name__ == "__main__":
             if args.version:
                 cfg.dataset.version = args.version
             else:
-                print("Warning: Inductive config used but no version specified. default v1.")
-                cfg.dataset.version = 'v1'
+                print("Warning: Inductive config used but no version specified. Using full dataset.")
+                cfg.dataset.version = ''
 
     # Set Config Name
     config_name = args.config.split('/')[-1].split('.')[0]
