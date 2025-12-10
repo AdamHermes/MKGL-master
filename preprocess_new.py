@@ -319,30 +319,25 @@ class KGCDataset(InductiveKGCDataset):
         rel2text = pd.Series(rel_name['fine_name'].values, index=rel_name['raw_name'].values)
 
         # For standard KGC, we use 'transductive_vocab' as the only entity vocab
-        # If your dataset.py uses 'entity_vocab' for standard KGC, use that.
-        # Assuming we reuse InductiveKnowledgeGraphDataset for simplicity where transductive_vocab == entity_vocab
-        vocab_source = getattr(kgdata, 'transductive_vocab', [])
-        
-        ent_vocab_df = pd.DataFrame({
-            'kg_id': range(len(vocab_source)), 
-            'raw_name': vocab_source, 
-            'transductive': 1
-        })
-        ent_vocab_df['fine_name'] = ent_vocab_df['raw_name'].map(lambda x: ent2text.get(x, x))
+        # If your dataset.py uses 'transductive_vocab' for standard KGC, use that.
+        # Assuming we reuse InductiveKnowledgeGraphDataset for simplicity where transductive_vocab == transductive_vocab
+        ent_vocab_df = pd.DataFrame({'kg_id': range(
+            len(kgdata.transductive_vocab)), 'raw_name': kgdata.transductive_vocab, 'transductive': 1}, )
+        ent_vocab_df['fine_name'] = ent2text[ent_vocab_df.raw_name.values].values
 
-        rel_vocab_df = pd.DataFrame({
-            'kg_id': range(len(kgdata.relation_vocab)), 
-            'raw_name': kgdata.relation_vocab, 
-            'transductive': 0
-        })
-        rel_vocab_df['fine_name'] = rel_vocab_df['raw_name'].map(lambda x: rel2text.get(x, x))
+        rel_vocab_df = pd.DataFrame({'kg_id': range(
+            len(kgdata.relation_vocab)), 'raw_name': kgdata.relation_vocab, 'transductive': 0})
+        rel_vocab_df['fine_name'] = rel2text[rel_vocab_df.raw_name.values].values
 
-        inv_rel_vocab_df = rel_vocab_df.iloc[:].copy()
+        inv_rel_vocab_df = rel_vocab_df.iloc[:]
         inv_rel_vocab_df['kg_id'] += len(inv_rel_vocab_df)
-        inv_rel_vocab_df['raw_name'] = self.inv_prefix + inv_rel_vocab_df['raw_name']
-        inv_rel_vocab_df['fine_name'] = self.inv_fine_prefix + inv_rel_vocab_df['fine_name']
+        inv_rel_vocab_df['raw_name'] = self.inv_prefix + \
+            inv_rel_vocab_df['raw_name']
+        inv_rel_vocab_df['fine_name'] = self.inv_fine_prefix + \
+            inv_rel_vocab_df['fine_name']
 
-        rel_vocab_df = pd.concat([rel_vocab_df, inv_rel_vocab_df], ignore_index=True)
+        rel_vocab_df = pd.concat(
+            [rel_vocab_df, inv_rel_vocab_df], ignore_index=True)
 
         def process_overlapped_name(rows):
             if len(rows) > 1:
@@ -418,10 +413,9 @@ class KGCDataset(InductiveKGCDataset):
             return df
 
         # Use transductive vocab for all splits in standard KGC
-        vocab = getattr(kgdata, 'transductive_vocab', [])
-        train_df = convert_to_df(train_set, vocab, kgdata.relation_vocab)
-        valid_df = convert_to_df(valid_set, vocab, kgdata.relation_vocab)
-        test_df = convert_to_df(test_set, vocab, kgdata.relation_vocab)
+        train_df = convert_to_df(train_set, kgdata.transductive_vocab, kgdata.relation_vocab)
+        valid_df = convert_to_df(valid_set, kgdata.transductive_vocab, kgdata.relation_vocab)
+        test_df = convert_to_df(test_set, kgdata.transductive_vocab, kgdata.relation_vocab)
 
         train_df['split'] = 'train'
         valid_df['split'] = 'valid'

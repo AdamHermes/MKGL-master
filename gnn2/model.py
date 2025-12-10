@@ -7,6 +7,13 @@ from torch_geometric.utils import to_undirected, degree
 from torch_geometric.nn import MessagePassing
 from .util import VirtualTensor, bincount, variadic_topks
 
+def print_stat(name, tensor):
+    if tensor is None:
+        print(f"DEBUG: {name} is None")
+        return
+    t = tensor.float() # Convert to float for stat calculation to avoid overflow/underflow issues in stats
+    print(f"DEBUG: {name} | Shape: {list(t.shape)} | Min: {t.min().item():.4f} | Max: {t.max().item():.4f} | Mean: {t.mean().item():.4f} | NaNs: {torch.isnan(t).sum().item()}")
+
 class PNA(nn.Module):
     def __init__(self, base_layer, num_layer, num_mlp_layer=2, remove_one_hop=False):
         super(PNA, self).__init__()
@@ -192,6 +199,9 @@ class ConditionedPNA(PNA):
 
         rel_embeds = self.rel_embedding(r_index[:, 0]) 
         rel_embeds = rel_embeds.type(hidden_states.dtype)
+        # DEBUG: Check initial embeddings
+        print_stat("Forward: Initial hidden_states", hidden_states)
+        print_stat("Forward: Initial rel_embeds", rel_embeds)
 
         input_embeds, init_score = self.init_input_embeds(graph, hidden_states, h_index[:, 0], score_text_embs, all_index, rel_embeds)
         
@@ -215,9 +225,15 @@ class ConditionedPNA(PNA):
         graph.pna_degree_out = graph.degree_out
 
         pna_degree_mean = (graph.degree_out + 1).log().mean()
+        print("\n--- START AGGREGATE ---")
+        print_stat("Aggregate: Init Score", graph.score)
 
         for i, layer in enumerate(self.layers):
-            print(f"DEBUG: Layer {i} | graph.score range: {graph.score.min()} to {graph.score.max()}")
+            print(f"\n--- LAYER {i} START ---")
+            print_stat(f"Layer {i}: graph.score (Start of Loop)", graph.score)
+            
+            # If this prints -62k, the corruption happened in init_input_embeds or passed init_score
+            
             edge_id_subset = self.select_edges(graph, graph.score)
             
             sub_edge_index = graph.edge_index[:, edge_id_subset]
@@ -234,62 +250,102 @@ class ConditionedPNA(PNA):
             subgraph.node_id = graph.node_id[unique_nodes]
             subgraph.pna_degree_mean = pna_degree_mean
             
-            layer_input = F.sigmoid(subgraph.score).unsqueeze(-1) * subgraph.hidden
+            # Gating mechanism: check if sigmoid is saturating due to high score
+            gate = F.sigmoid(subgraph.score).unsqueeze(-1)
+            print_stat(f"Layer {i}: Gate (Sigmoid output)", gate)
+            
+            layer_input = gate * subgraph.hidden
             
             hidden_out = layer(subgraph, layer_input.type(torch.float32))
             
             out_mask = subgraph.degree_out > 0
-            
             active_original_ids = unique_nodes[out_mask]
             
-            graph.hidden[active_original_ids] = (graph.hidden[active_original_ids] + hidden_out[out_mask]).type(graph.hidden.dtype)
+            # Update Hidden
+            prev_hidden = graph.hidden[active_original_ids]
+            update_delta = hidden_out[out_mask]
+            
+            # Check for explosion in hidden states (often causes score explosion next)
+            if update_delta.abs().max() > 100:
+                print(f"WARNING: Layer {i} hidden update delta is large!")
+                print_stat(f"Layer {i}: Update Delta", update_delta)
+                
+            graph.hidden[active_original_ids] = (prev_hidden + update_delta).type(graph.hidden.dtype)
+            print_stat(f"Layer {i}: Updated Hidden (Subset)", graph.hidden[active_original_ids])
 
             batch_idx = graph.batch[active_original_ids]
             
+            # Update Score
+            print(f"DEBUG: Layer {i} | Calculating new scores...")
             new_scores = self.score(graph.hidden[active_original_ids], graph.query[batch_idx])
+            
+            # Track the new scores BEFORE they go back into the graph
+            print_stat(f"Layer {i}: New Scores Calculated", new_scores)
+            
             graph.score[active_original_ids] = new_scores.type(graph.score.dtype)
 
+        print("--- END AGGREGATE ---\n")
         return graph.score
 
     def init_input_embeds(self, graph, head_embeds, head_index, tail_embeds, tail_index, rel_embeds):
-        input_embeds = VirtualTensor.zeros(graph.num_nodes, rel_embeds.shape[1], 
-                                           device=rel_embeds.device, dtype=rel_embeds.dtype)
+        if tail_embeds.dtype != head_embeds.dtype:
+            tail_embeds = tail_embeds.to(head_embeds.dtype)
+
+        batch_size = rel_embeds.size(0)
+        input_embeds_full = tail_embeds.repeat(batch_size, 1)
         
-        input_embeds[tail_index] = tail_embeds.type(head_embeds.dtype)
-        input_embeds[head_index] = head_embeds
-        
+        if input_embeds_full.size(0) != graph.num_nodes:
+             input_embeds_full = tail_embeds.repeat(batch_size, 1)
+
+        input_embeds_full[head_index] = head_embeds
+
         expanded_query = rel_embeds[graph.batch]
-        score_all = self.score(torch.zeros(graph.num_nodes, rel_embeds.shape[1], device=rel_embeds.device), expanded_query)
+        zero_embeds = torch.zeros(graph.num_nodes, rel_embeds.shape[1], 
+                                  device=rel_embeds.device, dtype=rel_embeds.dtype)
         
-        score_all[head_index] = self.score(head_embeds, rel_embeds)
+        print("\nDEBUG: init_input_embeds calc start")
+        score_all = self.score(zero_embeds, expanded_query)
+        print_stat("init_input_embeds: Raw Score (Zero Embeds)", score_all)
+        
+        score_head = self.score(head_embeds, rel_embeds)
+        print_stat("init_input_embeds: Raw Score (Head Embeds)", score_head)
+        
+        score_all[head_index] = score_head
+        
+        # Check before clamp
+        print_stat("init_input_embeds: Score All (Pre-Clamp)", score_all)
+        
+        score_all = torch.clamp(score_all, min=-15, max=15)
+        
+        # Check after clamp
+        print_stat("init_input_embeds: Score All (Post-Clamp)", score_all)
             
-        return input_embeds, score_all
+        return input_embeds_full, score_all
 
     def score(self, hidden, rel_embeds):
         heuristic = self.linear(torch.cat([hidden, rel_embeds], dim=-1))
         x = hidden * heuristic
-        score = self.mlp(x).squeeze(-1)
-        return score
+        raw_score = self.mlp(x).squeeze(-1)
+        if raw_score.abs().max() > 50 or torch.isnan(raw_score).any():
+            print("  DEBUG: score() internal tracking:")
+            print_stat("    score input: hidden", hidden)
+            print_stat("    score input: heuristic", heuristic)
+            print_stat("    score input: x (hidden*heuristic)", x)
+            print_stat("    score output", raw_score)
+        return raw_score
 
     def select_edges(self, graph, score):
         node_ratio = self.node_ratio if self.training else self.test_node_ratio
         degree_ratio = self.degree_ratio if self.training else self.test_degree_ratio
         
-        # 1. Calculate Node Limits Per Graph (Vectorized)
-        # We need counts for each graph in the batch
         num_nodes_per_graph = bincount(graph.batch, minlength=graph.num_graphs)
         
-        # Calculate 'ks' (nodes to keep) for each graph individually
-        # Shape: [Batch_Size]
         ks = (num_nodes_per_graph.float() * node_ratio).long()
         ks = torch.clamp(ks, min=1) # Ensure at least 1 node kept per graph
         
-        # We don't need torch.min(ks, num_nodes) here because the ratio math guarantees
-        # ks <= num_nodes (unless ratio > 1). But for safety/consistency:
         ks = torch.min(ks, num_nodes_per_graph)
 
-        # 2. Select Top-K Nodes
-        # variadic_topks expects 'ks' to be a Tensor of shape [Batch_Size]
+        
         index = variadic_topks(score, num_nodes_per_graph, ks=ks, break_tie=self.break_tie)[1]
         node_in = index 
         
@@ -297,43 +353,22 @@ class ConditionedPNA(PNA):
         src_mask = torch.zeros(graph.num_nodes, dtype=torch.bool, device=graph.edge_index.device)
         src_mask[node_in] = True
         
-        # Find edges starting from selected nodes
         edge_mask_in = src_mask[graph.edge_index[0]]
         
-        # 4. Calculate Edge Limits Per Graph
-        # Identify which graph each valid edge belongs to
         edge_batch = graph.batch[graph.edge_index[0][edge_mask_in]]
         num_edges_per_graph = bincount(edge_batch, minlength=graph.num_graphs)
         
-        # Calculate 'es' (edges to keep) based on the *actual* edges found
-        # Formula: degree_ratio * nodes_kept * average_degree
-        # Note: We approximate average degree here or use the ratio directly
-        
-        # Improved Logic: Use the ratio relative to the edges found connected to active nodes
-        # Original formula adaptation:
-        # es = (degree_ratio * ks * total_edges / total_nodes) -> This was scalar
-        
-        # Vectorized adaptation:
-        # es = degree_ratio * (ks / nodes_per_graph) * edges_per_graph
-        # effectively: es = degree_ratio * node_ratio * edges_per_graph
-        # But sticking closer to your original intent:
-        
-        # Calculate max edges allowed per graph
         es = (degree_ratio * ks.float() * (graph.num_edges / graph.num_nodes)).long()
         es = torch.clamp(es, min=1)
         
-        # Ensure 'es' tensor matches the size of 'num_edges_per_graph' 
-        # (Handle case where some graphs might have 0 valid edges)
         if es.size(0) != num_edges_per_graph.size(0):
-             # This happens if edge_batch doesn't cover all graphs
-             # We must align 'es' to 'num_edges_per_graph'
+            
              es_aligned = torch.zeros_like(num_edges_per_graph)
              # Fill based on graph indices available, or just recalculate 'es' using full batch stats
              # Simpler approach: Recalculate 'es' entirely using batch-wise stats
              es = (degree_ratio * ks.float() * (num_edges_per_graph.float() / num_nodes_per_graph.float().clamp(min=1))).long()
              es = torch.clamp(es, min=1)
 
-        # Apply limit: cannot select more edges than exist
         es = torch.min(es, num_edges_per_graph)
 
         # 5. Select Top-K Edges
