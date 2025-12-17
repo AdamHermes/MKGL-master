@@ -2,8 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 #from torchdrug import core
-from gnn2.model import *
-from gnn2.layer import PNALayer
+from gnn3.model import *
+from gnn3.layer import PNALayer
 
 
 
@@ -21,15 +21,9 @@ class BasePNARetriever(nn.Module):
         self.kgl2token = kgl2token
         self.orig_vocab_size = orig_vocab_size
         
-        #.down_scaling = nn.Linear(
-        #        self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
         self.down_scaling = nn.Linear(
-            text_embeddings.shape[1],  # use actual embedding dim instead of what in the config(2048)
-            self.config.r, 
-            bias=False, 
-            dtype=torch.float
-        )
-
+                self.config.llm_hidden_dim, self.config.r, bias=False, dtype=torch.float)
+        
         if self.config.text_encoder == 'pna':
             self.re_scaling = nn.Linear(config.r*12, self.config.r)
     
@@ -123,7 +117,7 @@ class ScoreRetriever(BasePNARetriever):
             query_input_dim=cfg_base.query_input_dim,
             message_func=cfg_base.get("message_func", "distmult"),
             aggregate_func=cfg_base.get("aggregate_func", "pna"),
-            layer_norm=cfg_base.get("layer_norm", True),
+            layer_norm=cfg_base.get("layer_no rm", True),
             dependent=cfg_base.get("dependent", True)
         )
         

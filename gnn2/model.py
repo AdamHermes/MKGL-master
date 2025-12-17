@@ -4,6 +4,7 @@ from torch.nn import functional as F
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import to_undirected, degree
 from .util import VirtualTensor, bincount, variadic_topks
+from .layer import MLP 
 
 def print_stat(name, tensor):
     if tensor is None:
@@ -26,7 +27,6 @@ class PNA(nn.Module):
             
         feature_dim = base_layer.output_dim + base_layer.input_dim
         
-        from .layer import MLP 
         self.mlp = MLP(feature_dim, [feature_dim] * (num_mlp_layer - 1) + [1])
         self.short_cut = getattr(base_layer, 'short_cut', False)
 
@@ -83,7 +83,7 @@ class ConditionedPNA(PNA):
 
     def forward(self, h_index, r_index, t_index, hidden_states, rel_hidden_states, graph, score_text_embs, all_index):
         print(f"DEBUG: START FORWARD | h_max={h_index.max()} t_max={t_index.max()} r_max={r_index.max()}")
-        print(f"DEBUG: GRAPH STATS | num_nodes={graph.num_nodes} edge_index_max={graph.edge_index.max()} edge_attr_max={graph.edge_attr.max() if graph.edge_attr is not None else 'None'}")
+        print(f"DEBUG: GRAPH STATS | num_ nodes={graph.num_nodes} edge_index_max={graph.edge_index.max()} edge_attr_max={graph.edge_attr.max() if graph.edge_attr is not None else 'None'}")
         graph = graph.clone()
         if r_index.max() >= self.num_relation * 2:
             print(f"CRASH PENDING: r_index {r_index.max()} >= limit {self.num_relation * 2}")
@@ -143,16 +143,15 @@ class ConditionedPNA(PNA):
         hidden = boundary.clone()
         
         graph.query = query
-        graph.boundary = boundary
+        graph.boundary = boundary  # KEY: Store boundary for layers to use
         graph.hidden = hidden
         graph.score = score
-        
         graph.node_id = torch.arange(graph.num_nodes, device=h_index.device)
-        
         graph.degree_out = degree(graph.edge_index[0], graph.num_nodes)
         graph.pna_degree_out = graph.degree_out
-
+        
         pna_degree_mean = (graph.degree_out + 1).log().mean()
+        
         print("\n--- START AGGREGATE ---")
         print_stat("Aggregate: Init Score", graph.score)
 
@@ -160,106 +159,93 @@ class ConditionedPNA(PNA):
             print(f"\n--- LAYER {i} START ---")
             print_stat(f"Layer {i}: graph.score (Start of Loop)", graph.score)
             
-            # If this prints -62k, the corruption happened in init_input_embeds or passed init_score
-            
             edge_id_subset = self.select_edges(graph, graph.score)
-            
-            # ... inside your aggregate loop ...
-            
             sub_edge_index = graph.edge_index[:, edge_id_subset]
             sub_edge_attr = graph.edge_attr[edge_id_subset] if graph.edge_attr is not None else None
             
-            # --- INSERT THIS DEBUG BLOCK ---
-            if sub_edge_attr is not None:
-                max_val = sub_edge_attr.max().item()
-                limit = self.num_relation * 2
-                print(f"DEBUG: Layer {i} | Edge Attr Max: {max_val} | Limit: {limit}")
-                
-                if max_val >= limit:
-                    # This print proves the config is the issue, not the subgraph code
-                    print(f"!!! CRASH DETECTED !!!")
-                    print(f"You have a Relation ID {max_val} but only configured {limit} slots.")
-                    print(f"Your 'sub_edge_attr' logic is correct, but the DATA is out of bounds.")
-                    # We exit explicitly to avoid the confusing CUDA error
-                    import sys; sys.exit(1)
-            # -------------------------------
-
             unique_nodes, new_edge_index = sub_edge_index.unique(return_inverse=True)
-            # ... continue ...
-            
             subgraph = Data(edge_index=new_edge_index, edge_attr=sub_edge_attr)
             subgraph.num_nodes = unique_nodes.size(0)
             
+            # KEY ADDITIONS:
+            subgraph.boundary = graph.hidden[unique_nodes]  # Self-loop features
             subgraph.score = graph.score[unique_nodes]
             subgraph.hidden = graph.hidden[unique_nodes]
             subgraph.degree_out = graph.degree_out[unique_nodes]
-            subgraph.query = graph.query[graph.batch[unique_nodes]]
-            subgraph.batch = graph.batch[unique_nodes]
             subgraph.pna_degree_out = subgraph.degree_out
             subgraph.node_id = graph.node_id[unique_nodes]
             subgraph.pna_degree_mean = pna_degree_mean
+            subgraph.query = graph.query[graph.batch[unique_nodes]]  # Queries for relations
             
-            # Gating mechanism: check if sigmoid is saturating due to high score
-            gate = F.sigmoid(subgraph.score).unsqueeze(-1)
-            print_stat(f"Layer {i}: Gate (Sigmoid output)", gate)
-            
-            layer_input = gate * subgraph.hidden
-            
-            hidden_out = layer(subgraph, layer_input.type(torch.float32))
+            # Pass raw hidden to layer (don't pre-gate)
+            hidden_out = layer(subgraph, subgraph.hidden.type(torch.float32))
             
             out_mask = subgraph.degree_out > 0
             active_original_ids = unique_nodes[out_mask]
             
-            # Update Hidden
+            # Update Hidden with residual connection (no gating before layer)
             prev_hidden = graph.hidden[active_original_ids]
             update_delta = hidden_out[out_mask]
             
-            # Check for explosion in hidden states (often causes score explosion next)
-            if update_delta.abs().max() > 100:
-                print(f"WARNING: Layer {i} hidden update delta is large!")
-                print_stat(f"Layer {i}: Update Delta", update_delta)
-                
-            graph.hidden[active_original_ids] = (prev_hidden + update_delta).type(graph.hidden.dtype)
+            print_stat(f"Layer {i}: Update Delta", update_delta)
+            
+            # Residual connection
+            new_hidden = prev_hidden + update_delta
+            graph.hidden[active_original_ids] = new_hidden.type(graph.hidden.dtype)
             print_stat(f"Layer {i}: Updated Hidden (Subset)", graph.hidden[active_original_ids])
 
-            batch_idx = graph.batch[active_original_ids]
-            
             # Update Score
-            print(f"DEBUG: Layer {i} | Calculating new scores...")
+            batch_idx = graph.batch[active_original_ids]
             new_scores = self.score(graph.hidden[active_original_ids], graph.query[batch_idx])
             
-            # Track the new scores BEFORE they go back into the graph
             print_stat(f"Layer {i}: New Scores Calculated", new_scores)
-            
             graph.score[active_original_ids] = new_scores.type(graph.score.dtype)
 
         print("--- END AGGREGATE ---\n")
         return graph.score
 
     def init_input_embeds(self, graph, head_embeds, head_index, tail_embeds, tail_index, rel_embeds):
+        """
+        Initialize input embeddings for the graph.
+        
+        Args:
+            graph: The batched knowledge graph
+            head_embeds: [batch_size, embed_dim] - embeddings for head entities
+            head_index: [batch_size] - node indices of heads in the batched graph
+            tail_embeds: [batch_size, embed_dim] - embeddings for tail entities
+            tail_index: [batch_size] - node indices of tails in the batched graph
+            rel_embeds: [batch_size, embed_dim] - relation embeddings
+        
+        Returns:
+            input_embeds_full: [num_nodes, embed_dim] - node embeddings
+            score_all: [num_nodes] - initial scores for each node
+        """
         if tail_embeds.dtype != head_embeds.dtype:
             tail_embeds = tail_embeds.to(head_embeds.dtype)
 
-        batch_size = rel_embeds.size(0)
-        input_embeds_full = tail_embeds.repeat(batch_size, 1)
+        # Initialize with zeros for all nodes
+        input_embeds_full = torch.zeros(
+            graph.num_nodes, 
+            head_embeds.shape[-1],
+            device=head_embeds.device, 
+            dtype=head_embeds.dtype
+        )
         
-        if input_embeds_full.size(0) != graph.num_nodes:
-             input_embeds_full = tail_embeds.repeat(batch_size, 1)
+        # Set tail embeddings at tail positions
+        input_embeds_full[tail_index] = tail_embeds
+        
+        # Set head embeddings at head positions (overrides tail if they overlap)
+        head_embeds_converted = head_embeds.to(input_embeds_full.dtype)
+        input_embeds_full[head_index] = head_embeds_converted
 
-        input_embeds_full[head_index] = head_embeds
-
-        expanded_query = rel_embeds[graph.batch]
-        zero_embeds = torch.zeros(graph.num_nodes, rel_embeds.shape[1], 
-                                  device=rel_embeds.device, dtype=rel_embeds.dtype)
+        # Compute batch-level scores (one per batch item)
+        batch_scores = self.score(torch.zeros_like(rel_embeds), rel_embeds)  # [batch_size]
         
-        print("\nDEBUG: init_input_embeds calc start")
-        score_all = self.score(zero_embeds, expanded_query)
-        print_stat("init_input_embeds: Raw Score (Zero Embeds)", score_all)
+        # Initialize all nodes with their batch's score via graph.batch mapping
+        score_all = batch_scores[graph.batch]  # [num_nodes]
         
-        score_head = self.score(head_embeds, rel_embeds)
-        print_stat("init_input_embeds: Raw Score (Head Embeds)", score_head)
-        
-        score_all[head_index] = score_head
+        # Override head positions with head-specific scores
+        score_all[head_index] = self.score(head_embeds, rel_embeds)
         
         # Check before clamp
         print_stat("init_input_embeds: Score All (Pre-Clamp)", score_all)
@@ -272,23 +258,10 @@ class ConditionedPNA(PNA):
         return input_embeds_full, score_all
 
     def score(self, hidden, rel_embeds):
-        # Normalize inputs
-        hidden_norm = F.normalize(hidden, p=2, dim=-1)
-        rel_norm = F.normalize(rel_embeds, p=2, dim=-1)
-        
-        # Concatenate
-        combined = torch.cat([hidden_norm, rel_norm], dim=-1)
-        heuristic = self.linear(combined)
-        heuristic = F.normalize(heuristic, p=2, dim=-1)
-        
-        # Element-wise multiplication on normalized tensors
-        x = hidden_norm * heuristic
-        
-        # MLP produces output, then scale it
-        raw_score = self.mlp(x).squeeze(-1)  # Should be bounded now
-        raw_score = raw_score * 10  # Scale to [-10, 10] range
-        
-        return raw_score
+        heuristic = self.linear(torch.cat([hidden, rel_embeds], dim=-1))
+        x = hidden * heuristic
+        score = self.mlp(x).squeeze(-1)
+        return score
 
     def select_edges(self, graph, score):
         node_ratio = self.node_ratio if self.training else self.test_node_ratio

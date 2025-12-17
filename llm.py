@@ -84,7 +84,6 @@ class MKGL(LlamaForCausalLM):
         batch_size = h_kgl_tokenid.shape[0]
         device = self.lm_head.weight.device
 
-
         mask = input_ids < self.orig_vocab_size
         token_embs = self.get_input_embeddings()(input_ids[mask])
         kgl_token_embs = self.context_retriever(input_ids[~mask], graph, all_index, all_kgl_index)
@@ -107,17 +106,19 @@ class MKGL(LlamaForCausalLM):
             return_dict=return_dict,
         )
 
+        # batch_size, seq_len, hidden_state
         hidden_states = transformer_outputs[0]
 
+        # select the last output of llm, batch_size x hidden_size
         hr_hidden_states = hidden_states[torch.arange(
             batch_size, device=hidden_states.device), input_length-1]
 
         rel_hidden_states = hidden_states[torch.arange(
             batch_size, device=hidden_states.device), input_length-2]
 
+
         pred = self.score_retriever(h_id, r_id, t_id, hr_hidden_states, rel_token_embs, graph, all_index, all_kgl_index)
         return pred
-    
 
     def get_input_kg_embeddings(self, kgl_token_ids):
         kgl_token_ids = kgl_token_ids - self.orig_vocab_size
