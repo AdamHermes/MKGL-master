@@ -5,6 +5,7 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.utils import to_undirected, degree
 from .util import VirtualTensor, bincount, variadic_topks
 from .layer import MLP 
+from torch_geometric.utils import subgraph as pyg_subgraph
 
 def print_stat(name, tensor):
     if tensor is None:
@@ -107,18 +108,46 @@ class ConditionedPNA(nn.Module):
                 continue
             
             # Create subgraph
-            sub_edge_index = graph.edge_index[:, edge_id_subset]
-            sub_edge_attr = graph.edge_attr[edge_id_subset] if graph.edge_attr is not None else None
-            
-            # Get unique nodes in subgraph
-            unique_nodes, new_edge_index = sub_edge_index.unique(return_inverse=True)
-            new_edge_index = new_edge_index.view(2, -1)
-            
+            # ===== CORRECT TorchDrug-style edge_mask(compact=True) =====
+
+            # 1. Build node mask induced by selected edges
+            edge_index_full = graph.edge_index
+            edge_subset = edge_id_subset
+
+            node_mask = torch.zeros(
+                graph.num_nodes,
+                dtype=torch.bool,
+                device=edge_index_full.device
+            )
+            node_mask[edge_index_full[0, edge_subset]] = True
+            node_mask[edge_index_full[1, edge_subset]] = True
+
+            # 2. PyG subgraph with relabeling (this is the critical step)
+            new_edge_index, _, edge_mask = pyg_subgraph(
+                node_mask,
+                edge_index_full,
+                relabel_nodes=True,
+                return_edge_mask=True
+            )
+
+            # 3. Node id mapping (TorchDrug's subgraph.node_id)
+            node_id = torch.nonzero(node_mask, as_tuple=True)[0]
+
+            # 4. Subgraph edge attributes
+            sub_edge_attr = (
+                graph.edge_attr[edge_mask]
+                if graph.edge_attr is not None
+                else None
+            )
+
             subgraph = Data(
                 edge_index=new_edge_index,
                 edge_attr=sub_edge_attr,
-                num_nodes=unique_nodes.size(0)
+                num_nodes=node_id.size(0),
             )
+
+            # ===== END FIX =====
+
             
             # Set up subgraph attributes
             subgraph.degree_out = degree(subgraph.edge_index[0], subgraph.num_nodes)

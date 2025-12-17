@@ -5,17 +5,19 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils import data as torch_data
-from torch_geometric.data import Data
 
 from transformers import LlamaForCausalLM, LlamaConfig
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
+from torchdrug import core, tasks
+from gnn.model import PNA
 from retriever import *
 
 class MKGLConfig(LlamaConfig):
     model_type = 'mkgl_config'
 
-    def __init__(self, **kwargs):
+    def __init__(self,
+                 **kwargs):
         super().__init__(**kwargs)
 
 class MKGL(LlamaForCausalLM):
@@ -24,20 +26,16 @@ class MKGL(LlamaForCausalLM):
     def __init__(self, config):
         super().__init__(config)
 
-    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg): 
+    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg,):
         self.kgl2token = kgl2token
         self.orig_vocab_size = orig_vocab_size
         
         device = self.lm_head.weight.device
         self.context_retriever = ContextRetriever(cfg.context_retriever, self.get_input_embeddings().weight.data, kgl2token, orig_vocab_size).to(device)
-        
-            
-        self.score_retriever = ScoreRetriever(
-            cfg.score_retriever, 
-            self.lm_head.weight.data, 
-            kgl2token, 
-            orig_vocab_size
-        ).to(device)
+        self.score_retriever = ScoreRetriever(cfg.score_retriever, self.lm_head.weight.data, kgl2token, orig_vocab_size).to(device)
+
+        # self._init_kg_score(len(kgl_vocab), r)
+
     def _init_kg_score(self, num_kg_tokens, ent_inter_emb_dim=64):
         device = self.lm_head.weight.device
 
@@ -57,6 +55,7 @@ class MKGL(LlamaForCausalLM):
             ]))
 
         self.kg_score = kg_lora_layer()
+
 
     def forward(
         self,
@@ -84,7 +83,6 @@ class MKGL(LlamaForCausalLM):
         batch_size = h_kgl_tokenid.shape[0]
         device = self.lm_head.weight.device
 
-
         mask = input_ids < self.orig_vocab_size
         token_embs = self.get_input_embeddings()(input_ids[mask])
         kgl_token_embs = self.context_retriever(input_ids[~mask], graph, all_index, all_kgl_index)
@@ -107,13 +105,16 @@ class MKGL(LlamaForCausalLM):
             return_dict=return_dict,
         )
 
+        # batch_size, seq_len, hidden_state
         hidden_states = transformer_outputs[0]
 
+        # select the last output of llm, batch_size x hidden_size
         hr_hidden_states = hidden_states[torch.arange(
             batch_size, device=hidden_states.device), input_length-1]
 
         rel_hidden_states = hidden_states[torch.arange(
             batch_size, device=hidden_states.device), input_length-2]
+
 
         pred = self.score_retriever(h_id, r_id, t_id, hr_hidden_states, rel_token_embs, graph, all_index, all_kgl_index)
         return pred
@@ -129,6 +130,7 @@ class MKGL(LlamaForCausalLM):
         kg_token_mask = kg_token_ids > 0
         kg_token_lengths = kg_token_mask.float().sum(axis=-1)
 
+        # shape: num_ents x hidden_size
         results = (token_embs[kg_token_ids.to(device)] *
                    kg_token_mask.unsqueeze(-1).to(device)).sum(axis=1).squeeze() / kg_token_lengths.unsqueeze(-1).float().to(device)
 
@@ -138,7 +140,6 @@ class MKGL(LlamaForCausalLM):
     
     def norm(self, x):
         return F.normalize(x, p=2, dim=1)
-
 
 class KGL4KGC(nn.Module):
 
@@ -175,6 +176,7 @@ class KGL4KGC(nn.Module):
         loss = (loss * neg_weight).sum(dim=-1) / neg_weight.sum(dim=-1)
         loss = loss.mean()
 
+        
         if all_loss is not None:
             loss = loss + all_loss
             
@@ -201,43 +203,50 @@ class KGL4KGC(nn.Module):
                 label[:, target] = 1
                 loss, _ = self.loss(pred, label)
                 pos_pred = pred.gather(-1, target.unsqueeze(-1))
+                # filter rank
                 ranking = torch.sum((pos_pred <= pred) & mask, dim=-1) + 1
                 return loss, ranking.to(device)
         
     
     def predict(self, batch, all_loss=None, metric=None):
         pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
-        
         device = pos_h_index.device
         batch_size = len(batch.h_id)
         graph = self.get_graph(batch).to(device)
-     
-
-        all_index = torch.arange(graph.num_nodes, device=device)
+        
+        # graph feature
+        all_index = torch.arange(graph.num_node, device=device)
         all_kgl_index = self.id2tokenid(all_index, split=batch.split)
         
         if self.training:
+            # train
             neg_index = self._strict_negative(
-               pos_h_index, pos_t_index, pos_r_index)
+                pos_h_index, pos_t_index, pos_r_index)
 
-            h_index = pos_h_index.unsqueeze(-1).repeat(2, self.num_negative + 1)
-            t_index = pos_t_index.unsqueeze(-1).repeat(2, self.num_negative + 1)
-            r_index = pos_r_index.unsqueeze(-1).repeat(2, self.num_negative + 1)
-            
-            t_index[:batch_size, 1:] = neg_index[:batch_size] 
+            h_index = pos_h_index.unsqueeze(-1).repeat(2,
+                                                       self.num_negative + 1)
+            t_index = pos_t_index.unsqueeze(-1).repeat(2,
+                                                       self.num_negative + 1)
+            r_index = pos_r_index.unsqueeze(-1).repeat(2,
+                                                       self.num_negative + 1)
+            t_index[:batch_size, 1:] = neg_index[:batch_size]
             h_index[batch_size:, 1:] = neg_index[batch_size:]
-
+            
             h_id, r_id, t_id = h_index, r_index, t_index
         else:
-            h_index, t_index = torch.meshgrid(pos_h_index, all_index) 
+            # test all
+            h_index, t_index = torch.meshgrid(pos_h_index, all_index)  # batch size x num ent
+            # inverse
             it_index, ih_index = torch.meshgrid(pos_t_index, all_index)
             
             r_index = pos_r_index.unsqueeze(-1).expand(-1, len(all_index))
             
+            # triplet feature
             h_id = torch.cat([h_index, ih_index])
             r_id = torch.cat([r_index, r_index])
             t_id = torch.cat([t_index, it_index])
             
+        # llm feature
         h_kgl_tokenid = torch.cat([batch.h_tokenid, batch.t_tokenid])
         r_kgl_tokenid = torch.cat([batch.r_tokenid, batch.inv_r_tokenid])
         input_ids = batch.input_ids
@@ -259,42 +268,31 @@ class KGL4KGC(nn.Module):
         return pred
     
     def target(self, batch):
+        # test target
         pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
-        batch_size = len(pos_h_index)
-        graph = self.get_eval_graph(batch) 
+        batch_size = len(batch.h_id)
+        graph = self.get_eval_graph(batch)
 
-        device = pos_h_index.device
-        num_nodes = graph.num_nodes
+        any = -torch.ones_like(pos_h_index)
 
-        h_all = graph.edge_index[0].to(device)
-        t_all = graph.edge_index[1].to(device)
-        r_all = graph.edge_attr.to(device) 
-
-        mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
-                 (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        matched_edges_t = mask_t.nonzero(as_tuple=False)
-        edge_idx_t = matched_edges_t[:, 0]
-        num_t_truth = mask_t.sum(dim=0)
-
-        t_truth_index = t_all[edge_idx_t]
-
+        pattern = torch.stack([pos_h_index, any, pos_r_index], dim=-1)
+        edge_index, num_t_truth = graph.match(pattern)
+        t_truth_index = graph.edge_list[edge_index, 1]
         pos_index = torch.repeat_interleave(num_t_truth)
-        t_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
+        t_mask = torch.ones(batch_size, graph.num_node,
+                            dtype=torch.bool, device=pos_h_index.device)
         t_mask[pos_index, t_truth_index] = 0
 
-        mask_h = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
-                 (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        matched_edges_h = mask_h.nonzero(as_tuple=False)
-        edge_idx_h = matched_edges_h[:, 0]
-        num_h_truth = mask_h.sum(dim=0)
-
-        h_truth_index = h_all[edge_idx_h]
+        pattern = torch.stack([any, pos_t_index, pos_r_index], dim=-1)
+        edge_index, num_h_truth = graph.match(pattern)
+        h_truth_index = graph.edge_list[edge_index, 0]
         pos_index = torch.repeat_interleave(num_h_truth)
-        h_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
+        h_mask = torch.ones(batch_size, graph.num_node,
+                            dtype=torch.bool, device=pos_h_index.device)
         h_mask[pos_index, h_truth_index] = 0
 
-        mask = torch.cat([t_mask, h_mask], dim=0)
-        target = torch.cat([pos_t_index, pos_h_index], dim=0)
+        mask = torch.cat([t_mask, h_mask])
+        target = torch.cat([pos_t_index, pos_h_index])
 
         return mask, target
         
@@ -309,22 +307,20 @@ class KGL4KGC(nn.Module):
         self.num_entity = dataset.num_entity
         self.num_relation = dataset.num_relation
         fact_mask = torch.ones(len(dataset), dtype=torch.bool)
-        fact_mask[valid_set.indices] = False
-        fact_mask[test_set.indices] = False
+        fact_mask[valid_set.indices] = 0
+        fact_mask[test_set.indices] = 0
         self.graph = dataset.graph
-        self.fact_graph = self.graph.clone()
-        self.fact_graph.edge_index = self.graph.edge_index[:, fact_mask]        
-        self.fact_graph.edge_attr = self.graph.edge_attr[fact_mask]
+        self.fact_graph = dataset.graph.edge_mask(fact_mask)
         return train_set, valid_set, test_set
 
     def id2tokenid(self, id, split='test', entity=True):
         if entity:
-            id2rawname = np.array(self.dataset.kgdata.transductive_vocab)
+            id2rawname = np.array(self.dataset.kgdata.entity_vocab)
         else:
             id2rawname = np.array(self.dataset.kgdata.relation_vocab)
         rawname = id2rawname[id.cpu()]
         tokenid = np.stack([self.dataset.rawname2tokenid.loc[n]
-                            for n in rawname])
+                           for n in rawname])
         return torch.tensor(tokenid, dtype=id.dtype, device=id.device)
 
     def get_graph(self, batch):
@@ -335,67 +331,35 @@ class KGL4KGC(nn.Module):
 
     @torch.no_grad()
     def _strict_negative(self, pos_h_index, pos_t_index, pos_r_index):
-        batch_size = pos_h_index.size(0)
-        device = pos_h_index.device
-        num_entity = self.num_entity
-        num_negative = self.num_negative
+        batch_size = len(pos_h_index)
+        any = -torch.ones_like(pos_h_index)
 
-        # Ensure graph is on the correct device
-        h_all = self.fact_graph.edge_index[0].to(device)
-        t_all = self.fact_graph.edge_index[1].to(device)
-        r_all = self.fact_graph.edge_attr.to(device)
+        pattern = torch.stack([pos_h_index, any, pos_r_index], dim=-1)
+        # pattern = pattern[:batch_size // 2]
+        edge_index, num_t_truth = self.fact_graph.match(pattern)
+        t_truth_index = self.fact_graph.edge_list[edge_index, 1]
+        pos_index = torch.repeat_interleave(num_t_truth)
+        t_mask = torch.ones(len(pattern), self.num_entity, dtype=torch.bool, device=self.device)
+        t_mask[pos_index, t_truth_index] = 0
+        neg_t_candidate = t_mask.nonzero()[:, 1]
+        num_t_candidate = t_mask.sum(dim=-1)
+        neg_t_index = functional.variadic_sample(neg_t_candidate, num_t_candidate, self.num_negative)
 
-        # -------------------------------------------
-        # 1. Vectorized Tail Negatives
-        # -------------------------------------------
-        # Find all matching edges: [E, B] boolean mask
-        # Note: This uses ~300MB memory for FB15k-237 with batch=1024. 
-        # If OOM occurs, you must reduce batch size.
-        mask_t_edges = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
-                       (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        
-        # matches: [N_matches, 2] -> col 0: edge_idx, col 1: batch_idx
-        matches_t = mask_t_edges.nonzero()
-        
-        # Create a "Probability" mask initialized to 1 (all candidates valid)
-        # Shape: [Batch_Size, Num_Entity]
-        candidate_mask = torch.ones(batch_size, num_entity, device=device)
-        
-        # Get the actual True Tails from the graph
-        true_tails = t_all[matches_t[:, 0]]
-        batch_indices = matches_t[:, 1]
-        
-        # Set the True Tails to 0 (Invalid) for their respective batch samples
-        # This vectorized indexing replaces your loop
-        candidate_mask[batch_indices, true_tails] = 0
-        
-        # Sample from the mask
-        # replacement=True is faster and safe. 
-        # replacement=False matches randperm behavior (strictly unique negatives per sample)
-        neg_t_index = torch.multinomial(candidate_mask, num_negative, replacement=True)
+        pattern = torch.stack([any, pos_t_index, pos_r_index], dim=-1)
+        # pattern = pattern[batch_size // 2:]
+        edge_index, num_h_truth = self.fact_graph.match(pattern)
+        h_truth_index = self.fact_graph.edge_list[edge_index, 0]
+        pos_index = torch.repeat_interleave(num_h_truth)
+        h_mask = torch.ones(len(pattern), self.num_entity, dtype=torch.bool, device=self.device)
+        h_mask[pos_index, h_truth_index] = 0
+        neg_h_candidate = h_mask.nonzero()[:, 1]
+        num_h_candidate = h_mask.sum(dim=-1)
+        neg_h_index = functional.variadic_sample(neg_h_candidate, num_h_candidate, self.num_negative)
 
-        # -------------------------------------------
-        # 2. Vectorized Head Negatives
-        # -------------------------------------------
-        mask_h_edges = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
-                       (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        
-        matches_h = mask_h_edges.nonzero()
-        
-        # Reset mask for heads
-        candidate_mask = torch.ones(batch_size, num_entity, device=device)
-        
-        true_heads = h_all[matches_h[:, 0]]
-        batch_indices = matches_h[:, 1]
-        
-        candidate_mask[batch_indices, true_heads] = 0
-        
-        neg_h_index = torch.multinomial(candidate_mask, num_negative, replacement=True)
+        neg_index = torch.cat([neg_t_index, neg_h_index])
 
-        # -------------------------------------------
-        # Return combined
-        # -------------------------------------------
-        return torch.cat([neg_t_index, neg_h_index], dim=0)
+        return neg_index    
+
 
 class KGL4IndKGC(KGL4KGC):
 

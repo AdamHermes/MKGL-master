@@ -5,9 +5,6 @@ import torch.nn.functional as F
 from gnn2.model import *
 from gnn2.layer import PNALayer
 
-
-
-
 class BasePNARetriever(nn.Module): 
     '''
     Retrieve text information
@@ -95,6 +92,7 @@ class ContextRetriever(BasePNARetriever):
         text_embs = super().forward(kgl_ids)
         context = self.up_scaling(text_embs)
         return context
+
         
 
         
@@ -103,22 +101,17 @@ class ScoreRetriever(BasePNARetriever):
     def __init__(self, config, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         
-        # Parse kg_encoder config
         cfg_kg = config.kg_encoder
         cfg_base = cfg_kg.base_layer
         
-        # Create base layer with proper attributes
-        # 2. Initialize Base Layer
-        # This is the single layer definition
         base_layer = PNALayer(
             input_dim=cfg_base.input_dim,          # 32
             output_dim=cfg_base.output_dim,        # 32
             num_relation=cfg_kg.num_relation,            # PASSED FROM DATASET
             query_input_dim=cfg_base.query_input_dim,
-            message_func=cfg_base.get("message_func", "distmult"),
             aggregate_func=cfg_base.get("aggregate_func", "pna"),
-            layer_norm=cfg_base.get("layer_no rm", True),
-            dependent=cfg_base.get("dependent", True)
+            layer_norm=cfg_base.get("layer_norm", "yes"),
+            dependent=cfg_base.get("dependent", "yes")
         )
         
         # 3. Initialize ConditionedPNA
@@ -129,7 +122,7 @@ class ScoreRetriever(BasePNARetriever):
             num_mlp_layer=cfg_kg.get("num_mlp_layer", 2),
             node_ratio=cfg_kg.get("node_ratio", 0.1),
             degree_ratio=cfg_kg.get("degree_ratio", 1),
-            remove_one_hop=cfg_kg.get("remove_one_hop", False)
+            remove_one_hop=cfg_kg.get("remove_one_hop", "yes")
         )
         
         # Down-scaling layers
@@ -144,23 +137,7 @@ class ScoreRetriever(BasePNARetriever):
 
     def forward(self, h_id, r_id, t_id, hidden_states, rel_hidden_states, 
                 graph, all_index, all_kgl_index):
-        """
-        Forward pass for score retrieval
         
-        Args:
-            h_id: Head entity IDs [batch_size, num_samples]
-            r_id: Relation IDs [batch_size, num_samples]
-            t_id: Tail entity IDs [batch_size, num_samples]
-            hidden_states: Entity embeddings from LLM [num_entities, llm_hidden_dim]
-            rel_hidden_states: Relation embeddings [num_relations, llm_hidden_dim]
-            graph: PyTorch Geometric Data object with KG structure
-            all_index: All entity indices [num_entities]
-            all_kgl_index: All KGL entity indices
-        
-        Returns:
-            score: Prediction scores [batch_size, num_samples]
-        """
-        # Get text embeddings for all entities
         score_text_embs = super().forward(all_kgl_index)
         
         # Down-scale LLM embeddings to model dimension
