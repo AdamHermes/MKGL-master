@@ -1,4 +1,9 @@
 import os, sys, logging, argparse, yaml, easydict
+import os
+os.environ["MPLBACKEND"] = "Agg"   # MUST be before importing matplotlib or torchdrug
+
+import matplotlib
+matplotlib.use("Agg")              # double-force safe backend
 import numpy as np
 import torch
 
@@ -12,11 +17,13 @@ from peft import (
     get_peft_model,
 )
 from accelerate import Accelerator
-#from torchdrug.utils import comm, pretty
+
+import yaml
+
 
 from llm import *
 from collector import *
-from preprocess import *
+from preprocess_new import *
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='data preprocessing')
@@ -27,12 +34,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", "-s", type=str,
                         default=42)
     args = parser.parse_args()
-    
+    accelerator = Accelerator()
+    rank = accelerator.process_index
     with open(args.config, "r") as f:
         cfg = easydict.EasyDict(yaml.safe_load(f))
         if args.version:
             cfg.dataset.version = args.version
-    torch.manual_seed(args.seed + comm.get_rank())
+    torch.manual_seed(args.seed + rank)
 
     config_name = args.config.split('/')[-1].split('.')[0]
     if hasattr(cfg.dataset, 'version'):
@@ -41,7 +49,9 @@ if __name__ == "__main__":
     cfg.trainer.output_dir += config_name
     
     
-    
+    if rank == 0:
+        print("Config file: %s" % args.config)
+        print(yaml.dump(cfg, sort_keys=False))
     
 
     saved_dir = 'data/preprocessed/'
@@ -51,12 +61,13 @@ if __name__ == "__main__":
     else:
         dataset = KGCDataset.load(file_path)
     tokenizer = dataset.tokenizer
-    cfg.context_retriever.kg_encoder.base_layer.num_relation = int(
-        dataset.kgdata.num_relation)
-    cfg.score_retriever.kg_encoder.base_layer.num_relation = int(
-        dataset.kgdata.num_relation)
+    num_rel = int(dataset.kgdata.num_relation)
+    cfg.context_retriever.kg_encoder.num_relation = num_rel
+    cfg.context_retriever.kg_encoder.num_relations = num_rel 
+    cfg.score_retriever.kg_encoder.num_relation = num_rel
+    cfg.score_retriever.kg_encoder.num_relations = num_rel
     
-    torch.nn.Module = torch.nn._Module
+    #torch.nn.Module = torch.nn._Module
     config = MKGLConfig.from_pretrained(**cfg.mkglconfig)
     model = MKGL.from_pretrained(
         **cfg.mkgl, device_map={"": Accelerator().process_index}, config=config)
@@ -67,7 +78,9 @@ if __name__ == "__main__":
     kgl2token = torch.tensor(np.stack(dataset.vocab_df.text_token_ids)[:, :cfg.kgl_token_length])     
     model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg) 
     
-    
+    if rank == 0:
+        print(model.print_trainable_parameters())
+        print(model)
 
     
     if 'ind' in args.config:
@@ -79,7 +92,8 @@ if __name__ == "__main__":
     data_loader = MKGLDataCollector(dataset)
     
     training_args = TrainingArguments(**cfg.trainer)
-    
+    if rank == 0:
+        print(training_args)
 
 
     def compute_metrics(predictions):
@@ -98,7 +112,8 @@ if __name__ == "__main__":
                 raise ValueError("Unknown metric `%s`" % _metric)
 
             results[_metric] = score
-        
+        if rank == 0:
+            print(results)
         return results
 
     removed_columns = ['h_raw', 't_raw', 'r_raw', 'h_fine', 't_fine', 'r_fine', 'inv_r_fine']

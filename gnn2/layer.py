@@ -6,10 +6,41 @@ from torch_geometric.nn import MessagePassing
 from typing import Sequence
 
 class MLP(nn.Module):
+<<<<<<< HEAD
     """
     Multi-layer Perceptron.
     Note there is no batch normalization, activation or dropout in the last layer.
     """
+=======
+    def __init__(self, input_dim, hidden_dims, activation='relu', dropout=0.0):
+        super(MLP, self).__init__()
+        
+        layers = []
+        current_dim = input_dim
+        
+        # If hidden_dims is a single int, convert to list
+        if isinstance(hidden_dims, int):
+            hidden_dims = [hidden_dims]
+            
+        for i, hidden_dim in enumerate(hidden_dims):
+            layers.append(nn.Linear(current_dim, hidden_dim))
+            
+            # Apply activation and dropout to all layers except the last one
+            if i < len(hidden_dims) - 1:
+                if activation == 'relu':
+                    layers.append(nn.ReLU())
+                elif activation == 'tanh':
+                    layers.append(nn.Tanh())
+                elif activation == 'sigmoid':
+                    layers.append(nn.Sigmoid())
+                
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+            
+            current_dim = hidden_dim
+            
+        self.mlp = nn.Sequential(*layers)
+>>>>>>> parent of b26ec32 (graph augmentation)
 
     def __init__(self, input_dim, hidden_dims, short_cut=False, batch_norm=False, activation="relu", dropout=0):
         super(MLP, self).__init__()
@@ -178,16 +209,12 @@ class PNALayer(MessagePassing):
         scale = scale / pna_degree_mean
         
         # Scales: [N, 1, 3] -> (1, scale, 1/scale)
-
+        scales = torch.cat([torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)
+        
         # --- D. Apply Scaling ---
         # [N, D, 4, 1] * [N, 1, 1, 3] -> [N, D, 4, 3] -> Flatten -> [N, D*12]
-        scales = torch.cat([torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)
-        scales = scales.unsqueeze(1)  # [N, 1, 3]
-
-        # Multiply and flatten properly
-        update = (features.unsqueeze(-1) * scales.unsqueeze(-2))  # [N, D, 4, 3]
-        update = update.reshape(update.size(0), update.size(1), -1)  # [N, D, 12]
-        update = update.flatten(1)  # [N, D*12]
+        update = (features.unsqueeze(-1) * scales.unsqueeze(-2)).flatten(-2).flatten(-1)
+        
         return update
 
     def combine(self, input, update):

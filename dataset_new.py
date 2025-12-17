@@ -37,6 +37,10 @@ class InductiveKnowledgeGraphDataset(Dataset):
         return self._num_transductive_nodes
 
     def _create_pyg_graph(self, triplets, num_nodes, num_relations):
+        if isinstance(triplets, torch.Tensor):
+        # Keep only rows where relation ID is valid
+            mask = (triplets[:, 2] < num_relations) & (triplets[:, 2] >= 0)
+            triplets = triplets[mask]
         if len(triplets) == 0:
             return Data(edge_index=torch.empty((2, 0), dtype=torch.long),
                         edge_attr=torch.empty(0, dtype=torch.long),

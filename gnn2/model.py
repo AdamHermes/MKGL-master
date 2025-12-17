@@ -51,12 +51,13 @@ class ConditionedPNA(nn.Module):
         
         # Make undirected with inverse relations
         if graph.edge_attr is not None:
+            # Create reverse edges with num_relation offset
             reverse_edge_index = torch.stack([graph.edge_index[1], graph.edge_index[0]], dim=0)
-            reverse_edge_attr = graph.edge_attr + self.num_relation
+            reverse_edge_attr = graph.edge_attr + self.num_relation  # Shift for reverse direction
+            
             graph.edge_index = torch.cat([graph.edge_index, reverse_edge_index], dim=1)
             graph.edge_attr = torch.cat([graph.edge_attr, reverse_edge_attr], dim=0)
-        
-        # Convert to tail prediction format
+
         h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
         
         # Create batched graph
@@ -101,39 +102,40 @@ class ConditionedPNA(nn.Module):
         pna_degree_mean = (graph.degree_out + 1).log().mean()
         
         for i, layer in enumerate(self.layers):
-            # Select important edges based on current scores
-            edge_id_subset = self.select_edges(graph, score)
+            print(f"\n--- LAYER {i} START ---")
+            print_stat(f"Layer {i}: graph.score (Start of Loop)", graph.score)
             
-            if len(edge_id_subset) == 0:
-                continue
+            # If this prints -62k, the corruption happened in init_input_embeds or passed init_score
             
-            # Create subgraph
-            # ===== CORRECT TorchDrug-style edge_mask(compact=True) =====
-
-            # 1. Build node mask induced by selected edges
+            edge_id_subset = self.select_edges(graph, graph.score)
+            
+            # ... inside your aggregate loop ...
+            
             edge_index_full = graph.edge_index
             edge_subset = edge_id_subset
 
+            # 1. Build node mask induced by selected edges
             node_mask = torch.zeros(
                 graph.num_nodes,
                 dtype=torch.bool,
-                device=edge_index_full.device
+                device=edge_index_full.device,
             )
+
             node_mask[edge_index_full[0, edge_subset]] = True
             node_mask[edge_index_full[1, edge_subset]] = True
 
-            # 2. PyG subgraph with relabeling (this is the critical step)
+            # 2. Compact subgraph (TorchDrug edge_mask(compact=True))
             new_edge_index, _, edge_mask = pyg_subgraph(
                 node_mask,
                 edge_index_full,
                 relabel_nodes=True,
-                return_edge_mask=True
+                return_edge_mask=True,
             )
 
-            # 3. Node id mapping (TorchDrug's subgraph.node_id)
+            # 3. Node mapping (TorchDrug: subgraph.node_id)
             node_id = torch.nonzero(node_mask, as_tuple=True)[0]
 
-            # 4. Subgraph edge attributes
+            # 4. Edge attributes
             sub_edge_attr = (
                 graph.edge_attr[edge_mask]
                 if graph.edge_attr is not None
@@ -146,35 +148,41 @@ class ConditionedPNA(nn.Module):
                 num_nodes=node_id.size(0),
             )
 
-            # ===== END FIX =====
 
+            # ... continue ...
             
-            # Set up subgraph attributes
-            subgraph.degree_out = degree(subgraph.edge_index[0], subgraph.num_nodes)
+            subgraph.num_nodes = node_id.size(0)
+            
+            subgraph.score = score[node_id]
+            subgraph.hidden = hidden[node_id]
+            subgraph.degree_out = graph.degree_out[node_id]
+            subgraph.batch = graph.batch[node_id]
+            subgraph.query = graph.query[graph.batch[node_id]]
             subgraph.pna_degree_out = subgraph.degree_out
+            subgraph.node_id = node_id
             subgraph.pna_degree_mean = pna_degree_mean
             
             # Get batch indices for queries
-            batch_idx = graph.batch[unique_nodes]
+            batch_idx = graph.batch[node_id]
             subgraph.query = query[batch_idx]
             
             # CRITICAL: Apply score-based gating to hidden states
             # This is the key difference from standard message passing
-            node_scores = score[unique_nodes]
+            node_scores = score[node_id]
             score_weights = F.sigmoid(node_scores).unsqueeze(-1)  # [num_subgraph_nodes, 1]
             
             # Gated input: multiply hidden by sigmoid(score)
-            layer_input = score_weights * hidden[unique_nodes]
+            layer_input = score_weights * hidden[node_id]
             
             # Boundary for self-loops (original embeddings)
-            subgraph.boundary = boundary[unique_nodes]
+            subgraph.boundary = boundary[node_id]
             
             # Run message passing on subgraph
             hidden_update = layer(subgraph, layer_input.type(torch.float32))
             
             # Only update nodes with outgoing edges
             out_mask = subgraph.degree_out > 0
-            active_node_ids = unique_nodes[out_mask]
+            active_node_ids = node_id[out_mask]
             
             if len(active_node_ids) == 0:
                 continue
@@ -229,20 +237,23 @@ class ConditionedPNA(nn.Module):
         return input_embeds, score_all
 
     def score(self, hidden, rel_embeds):
-        """Compute relevance score for nodes given query relation"""
-        # Concatenate hidden state with relation embedding
-        combined = torch.cat([hidden, rel_embeds], dim=-1)
+        # Normalize inputs
+        hidden_norm = F.normalize(hidden, p=2, dim=-1)
+        rel_norm = F.normalize(rel_embeds, p=2, dim=-1)
         
-        # Linear projection to get heuristic
+        # Concatenate
+        combined = torch.cat([hidden_norm, rel_norm], dim=-1)
         heuristic = self.linear(combined)
+        heuristic = F.normalize(heuristic, p=2, dim=-1)
         
-        # Element-wise multiplication (query-specific gating)
-        x = hidden * heuristic
+        # Element-wise multiplication on normalized tensors
+        x = hidden_norm * heuristic
         
-        # MLP to get final score
-        score = self.mlp(x).squeeze(-1)
+        # MLP produces output, then scale it
+        raw_score = self.mlp(x).squeeze(-1)  # Should be bounded now
+        raw_score = raw_score * 10  # Scale to [-10, 10] range
         
-        return score
+        return raw_score
 
     def select_edges(self, graph, score):
         """Select top-k nodes and their top-k' edges based on scores"""
