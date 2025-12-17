@@ -126,7 +126,17 @@ class VirtualTensor:
             indexes = (indexes,)
         keys = indexes[0]
         
-        assert keys.numel() == 0 or (keys.max() < len(self.index) and keys.min() >= 0)
+        # Handle empty keys
+        if keys.numel() == 0:
+            return torch.empty(0, *self.shape[1:], dtype=self.dtype, device=self.device)
+        
+        # Bounds checking
+        if keys.max() >= len(self.index) or keys.min() < 0:
+            raise IndexError(
+                f"Index out of bounds: keys range [{keys.min()}, {keys.max()}], "
+                f"but VirtualTensor has {len(self.index)} elements"
+            )
+        
         values = self.input[(self.index[keys],) + indexes[1:]]
         
         if len(self.keys) > 0:
@@ -235,10 +245,32 @@ class RepeatGraph:
         Returns:
             New RepeatGraph with selected edges
         """
+        # Handle empty selection
+        if isinstance(edge_mask, torch.Tensor):
+            if edge_mask.numel() == 0:
+                # Return empty graph
+                empty_graph = Data(
+                    edge_index=torch.empty((2, 0), dtype=torch.long, device=self.device),
+                    num_nodes=0
+                )
+                if self.num_relation is not None:
+                    empty_graph.num_relation = self.num_relation
+                node_map = torch.full((self.num_nodes,), -1, dtype=torch.long, device=self.device)
+                node_indices = torch.tensor([], dtype=torch.long, device=self.device)
+                return empty_graph, node_map, node_indices
+        
         if edge_mask.dtype == torch.bool:
             edge_indices = edge_mask.nonzero(as_tuple=True)[0]
         else:
             edge_indices = edge_mask
+        
+        # Validate edge indices
+        if len(edge_indices) > 0:
+            if edge_indices.max() >= self.num_edges or edge_indices.min() < 0:
+                raise IndexError(
+                    f"Edge indices out of bounds: range [{edge_indices.min()}, {edge_indices.max()}], "
+                    f"but graph has {self.num_edges} edges"
+                )
         
         # Get selected edges
         edge_index = self.edge_index[:, edge_indices]
@@ -302,10 +334,15 @@ class RepeatGraph:
         source_mask[node_indices] = True
         edge_mask = source_mask[edge_index[0]]
         
-        # Count edges per node
+        # Get the source nodes of edges that match
+        edge_sources = edge_index[0][edge_mask]
+        
+        # Count edges per node (only for nodes in node_indices)
+        # Create ones for each edge
+        ones = torch.ones_like(edge_sources)
         num_neighbors = scatter_add(
-            edge_mask.long(), 
-            edge_index[0][edge_mask],
+            ones, 
+            edge_sources,
             dim=0,
             dim_size=self.num_nodes
         )

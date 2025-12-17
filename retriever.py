@@ -2,8 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 #from torchdrug import core
-from gnn3.model import *
-from gnn3.layer import PNALayer
+from gnn2.model import *
+from gnn2.layer import PNALayer
 
 
 

@@ -308,8 +308,16 @@ class ConditionedPNA(nn.Module):
             # Select top-k nodes and their top-k' edges
             edge_indices = self.select_edges(graph, score)
             
+            # If no edges selected, skip this layer
+            if len(edge_indices) == 0:
+                continue
+            
             # Extract subgraph
             subgraph, node_map, node_indices = graph.subgraph(edge_indices)
+            
+            # Skip if subgraph is empty
+            if subgraph.num_nodes == 0 or len(node_indices) == 0:
+                continue
             
             # Get features for subgraph nodes
             layer_input = F.sigmoid(score[node_indices]).unsqueeze(-1) * hidden[node_indices]
@@ -339,6 +347,10 @@ class ConditionedPNA(nn.Module):
             # Update only nodes with outgoing edges in subgraph
             out_mask = degree_out_sub[:, 0] > 0
             node_out = node_indices[out_mask]
+            
+            # Skip if no nodes to update
+            if len(node_out) == 0:
+                continue
             
             # Accumulate updates
             hidden[node_out] = (hidden[node_out] + hidden_update[out_mask]).type(
@@ -373,16 +385,32 @@ class ConditionedPNA(nn.Module):
         es = (degree_ratio * ks * graph.num_edges_per_graph / 
               graph.num_nodes_per_graph).long()
         
+        # Ensure minimum values
+        ks = ks.clamp(min=1)
+        es = es.clamp(min=1)
+        
         # Get nodes with non-default scores
         if isinstance(score, VirtualTensor):
             node_in = score.keys
+            if len(node_in) == 0:
+                # No nodes scored yet, return empty
+                return torch.tensor([], dtype=torch.long, device=graph.device)
         else:
             node_in = torch.arange(len(score), device=score.device)
+        
+        # Verify node_in indices are valid
+        if len(node_in) > 0:
+            assert node_in.max() < graph.num_nodes, f"node_in max {node_in.max()} >= num_nodes {graph.num_nodes}"
+            assert node_in.min() >= 0, f"node_in min {node_in.min()} < 0"
         
         # Count nodes per batch
         batch = graph.batch[node_in]
         num_nodes = bincount(batch, minlength=batch_size)
         ks = torch.min(ks, num_nodes)
+        
+        # If no nodes to select, return empty
+        if ks.sum() == 0:
+            return torch.tensor([], dtype=torch.long, device=graph.device)
         
         # Select top-k nodes per batch
         score_in = score[node_in]
@@ -402,6 +430,10 @@ class ConditionedPNA(nn.Module):
         )
         es = torch.min(es, num_edges)
         
+        # If no edges to select, return empty
+        if es.sum() == 0:
+            return torch.tensor([], dtype=torch.long, device=graph.device)
+        
         # Process in chunks to avoid memory issues
         num_edge_mean = num_edges.float().mean().clamp(min=1)
         chunk_size = max(int(1e7 / num_edge_mean), 1)
@@ -418,17 +450,31 @@ class ConditionedPNA(nn.Module):
         for node_chunk, num_node, num_edge, e in zip(
             node_in_chunks, num_nodes_chunks, num_edges_chunks, es_chunks
         ):
+            if len(node_chunk) == 0 or e.sum() == 0:
+                continue
+                
             # Get edges and neighbors
             edge_index, node_out = graph.neighbors(node_chunk)
+            
+            if len(edge_index) == 0:
+                continue
+            
+            # Verify node_out indices are valid
+            assert node_out.max() < graph.num_nodes, f"node_out max {node_out.max()} >= num_nodes {graph.num_nodes}"
+            assert node_out.min() >= 0, f"node_out min {node_out.min()} < 0"
+            
             score_edge = score[node_out]
             
             # Select top-k' edges per batch in chunk
-            _, index = variadic_topks(
+            _, idx = variadic_topks(
                 score_edge, num_edge, ks=e,
                 largest=True, break_tie=self.break_tie
             )
-            edge_index = edge_index[index]
+            edge_index = edge_index[idx]
             edge_indexes.append(edge_index)
+        
+        if len(edge_indexes) == 0:
+            return torch.tensor([], dtype=torch.long, device=graph.device)
         
         edge_index = torch.cat(edge_indexes)
         return edge_index
