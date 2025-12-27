@@ -69,6 +69,10 @@ if __name__ == "__main__":
     
     #torch.nn.Module = torch.nn._Module
     config = MKGLConfig.from_pretrained(**cfg.mkglconfig)
+    # Ensure retriever linear layers match the LLM hidden size (TinyLlama = 2048)
+    cfg.context_retriever.llm_hidden_dim = config.hidden_size
+    cfg.score_retriever.llm_hidden_dim = config.hidden_size
+
     model = MKGL.from_pretrained(
         **cfg.mkgl, device_map={"": Accelerator().process_index}, config=config)
 

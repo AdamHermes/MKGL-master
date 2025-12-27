@@ -141,6 +141,14 @@ class PNALayer(MessagePassing):
     def aggregate(self, inputs, index, boundary, pna_degree_out, pna_degree_mean=None, dim_size=None):
         # inputs: Messages [Num_Edges, Input_Dim]
         # boundary: Target Node Features [Num_Nodes, Input_Dim]
+
+        # Keep scatter outputs aligned with boundary rows
+        if dim_size is None:
+            dim_size = boundary.size(0)
+
+        # Compute degree directly from edge index (safest approach)
+        degree_from_edges = scatter(torch.ones(index.size(0), device=index.device), 
+                                    index, dim=0, dim_size=dim_size, reduce='sum')
         
         # --- A. Aggregators ---
         # 1. Sum
@@ -150,13 +158,12 @@ class PNALayer(MessagePassing):
         sq_sum_agg = scatter(inputs ** 2, index, dim=0, dim_size=dim_size, reduce='sum')
         
         # 3. Max & Min
-        # Note: We rely on 'boundary' logic below to handle empty-neighbor cases naturally
         max_agg = scatter(inputs, index, dim=0, dim_size=dim_size, reduce='max')
         min_agg = scatter(inputs, index, dim=0, dim_size=dim_size, reduce='min')
         
         # --- B. Combine with Boundary (Self-Loop Logic) ---
-        # TorchDrug logic: degree = degree_out + 1 (includes self)
-        degree = pna_degree_out.unsqueeze(-1) + 1 
+        # degree = degree_out + 1 (includes self)
+        degree = degree_from_edges.unsqueeze(-1) + 1  # [N, 1]
         
         mean = (sum_agg + boundary) / degree
         sq_mean = (sq_sum_agg + boundary ** 2) / degree
@@ -165,9 +172,8 @@ class PNALayer(MessagePassing):
         max_feat = torch.max(max_agg, boundary)
         min_feat = torch.min(min_agg, boundary)
         
-        # Stack Features: [N, Dim, 4]
-        features = torch.cat([mean.unsqueeze(-1), max_feat.unsqueeze(-1), 
-                              min_feat.unsqueeze(-1), std.unsqueeze(-1)], dim=-1)
+        # features: list of [N, D] tensors, 4 total
+        features = [mean, max_feat, min_feat, std]  # Each is [N, D]
         
         # --- C. Scaling ---
         scale = degree.log()
@@ -177,12 +183,22 @@ class PNALayer(MessagePassing):
             
         scale = scale / pna_degree_mean
         
-        # Scales: [N, 1, 3] -> (1, scale, 1/scale)
+        # scales: [N, 3] - identity, amplification, attenuation
         scales = torch.cat([torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)
         
         # --- D. Apply Scaling ---
-        # [N, D, 4, 1] * [N, 1, 1, 3] -> [N, D, 4, 3] -> Flatten -> [N, D*12]
-        update = (features.unsqueeze(-1) * scales.unsqueeze(-2)).flatten(-2).flatten(-1)
+        # For each feature [N, D], multiply by each scale [N, 1] -> get 3 scaled versions
+        # Result: 4 features * 3 scales = 12 feature sets, each [N, D]
+        # Final update: [N, D * 12]
+        
+        scaled_features = []
+        for feat in features:  # feat: [N, D]
+            for s in range(3):  # 3 scalers
+                scaled_feat = feat * scales[:, s:s+1]  # [N, D] * [N, 1] -> [N, D]
+                scaled_features.append(scaled_feat)
+        
+        # Concatenate all 12 scaled features: [N, D * 12]
+        update = torch.cat(scaled_features, dim=-1)  # [N, D * 12]
         
         return update
 
