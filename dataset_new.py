@@ -318,13 +318,13 @@ class FB15k237(StandardKGCDataset):
         "https://raw.githubusercontent.com/kkteru/grail/master/data/fb237_%s/test.txt",
     ]
 
-    def __init__(self, path="data/datasets", version="v1", verbose=1):
+    def __init__(self, path="data/datasets", version="", verbose=1):
         super().__init__()
         if not os.path.exists(path): os.makedirs(path)
         
         files = []
         if version == "" or version is None:
-            # Use full dataset files (no version suffix)
+            # Full dataset (no version suffix)
             for filename in ["train.txt", "valid.txt", "test.txt"]:
                 save_file = f"fb15k237_{filename}"
                 txt_file = os.path.join(path, save_file)
@@ -332,7 +332,7 @@ class FB15k237(StandardKGCDataset):
                     raise FileNotFoundError(f"Full dataset file not found: {txt_file}")
                 files.append(txt_file)
         else:
-            # Use versioned files with download if needed
+            # Versioned subset; download if missing
             for url in self.urls:
                 url = url % version
                 save_file = f"fb15k237_{version}_{os.path.basename(url)}"
@@ -352,13 +352,13 @@ class WN18RR(StandardKGCDataset):
         "https://raw.githubusercontent.com/kkteru/grail/master/data/WN18RR_%s/test.txt",
     ]
 
-    def __init__(self, path="data/datasets", version="v1", verbose=1):
+    def __init__(self, path="data/datasets", version="", verbose=1):
         super().__init__()
         if not os.path.exists(path): os.makedirs(path)
         
         files = []
         if version == "" or version is None:
-            # Use full dataset files (no version suffix)
+            # Full dataset (no version suffix)
             for filename in ["train.txt", "valid.txt", "test.txt"]:
                 save_file = f"wn18rr_{filename}"
                 txt_file = os.path.join(path, save_file)
@@ -366,7 +366,7 @@ class WN18RR(StandardKGCDataset):
                     raise FileNotFoundError(f"Full dataset file not found: {txt_file}")
                 files.append(txt_file)
         else:
-            # Use versioned files with download if needed
+            # Versioned subset; download if missing
             for url in self.urls:
                 url = url % version
                 save_file = f"wn18rr_{version}_{os.path.basename(url)}"

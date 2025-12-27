@@ -323,11 +323,11 @@ class KGCDataset(InductiveKGCDataset):
         # Assuming we reuse InductiveKnowledgeGraphDataset for simplicity where transductive_vocab == transductive_vocab
         ent_vocab_df = pd.DataFrame({'kg_id': range(
             len(kgdata.transductive_vocab)), 'raw_name': kgdata.transductive_vocab, 'transductive': 1}, )
-        ent_vocab_df['fine_name'] = ent2text[ent_vocab_df.raw_name.values].values
+        ent_vocab_df['fine_name'] = ent2text[ent_vocab_df['raw_name'].values].values
 
         rel_vocab_df = pd.DataFrame({'kg_id': range(
             len(kgdata.relation_vocab)), 'raw_name': kgdata.relation_vocab, 'transductive': 0})
-        rel_vocab_df['fine_name'] = rel2text[rel_vocab_df.raw_name.values].values
+        rel_vocab_df['fine_name'] = rel2text[rel_vocab_df['raw_name'].values].values
 
         inv_rel_vocab_df = rel_vocab_df.iloc[:]
         inv_rel_vocab_df['kg_id'] += len(inv_rel_vocab_df)
@@ -433,19 +433,19 @@ if __name__ == "__main__":
     # Load Config
     with open(args.config, "r") as f:
         cfg = easydict.EasyDict(yaml.safe_load(f))
-        
-        # Apply version from command line args if provided
-        if args.version:
-            print(f"Using version from command line: '{args.version}'")
+
+        # Match legacy behavior: inductive runs must provide a version
+        if 'ind' in args.config:
+            if not args.version:
+                raise ValueError("Inductive config requires --version (e.g., v1).")
+            print(f"Using inductive version from command line: '{args.version}'")
             cfg.dataset.version = args.version
-        elif 'ind' in args.config:
-            # Only warn for inductive configs when no version specified
-            print("Warning: Inductive config used but no version specified. Using full dataset.")
+        elif args.version:
+            print(f"Overriding dataset version from command line: '{args.version}'")
+            cfg.dataset.version = args.version
+        elif not hasattr(cfg.dataset, 'version'):
+            # Non-inductive configs default to full dataset unless version is set in YAML
             cfg.dataset.version = ''
-        else:
-            # For non-inductive configs, default to empty string if not in config
-            if not hasattr(cfg.dataset, 'version'):
-                cfg.dataset.version = ''
 
     # Set Config Name
     config_name = args.config.split('/')[-1].split('.')[0]
@@ -463,7 +463,11 @@ if __name__ == "__main__":
     # Instantiate Dataset (Replaces TorchDrug core.Configurable)
     dataset_class_str = cfg.dataset.get('class', '')
     dataset_version = cfg.dataset.get('version', '')
-    
+    is_inductive = 'Inductive' in dataset_class_str or 'ind' in args.config
+
+    if is_inductive and not dataset_version:
+        raise ValueError("Inductive datasets need a version. Pass --version or set dataset.version in config.")
+
     kgdata = None
     # Inductive Check
     if 'FB15k237Inductive' in dataset_class_str:
@@ -477,8 +481,8 @@ if __name__ == "__main__":
         kgdata = WN18RR(version=dataset_version)
     else:
         print(f"Warning: Unknown dataset class {dataset_class_str} in config.")
-        if 'ind' in args.config:
-             raise ValueError("Please ensure dataset.py contains the inductive class requested.")
+        if is_inductive:
+            raise ValueError("Please ensure dataset.py contains the inductive class requested.")
 
     print('***************Load tokenizer***************')
     tokenizer = AutoTokenizer.from_pretrained(**cfg.tokenizer)
@@ -486,7 +490,7 @@ if __name__ == "__main__":
     tokenizer.padding_side = 'right'
     
     if kgdata:
-        if 'ind' in args.config:
+        if is_inductive:
             dataset = InductiveKGCDataset(args, kgdata, tokenizer)
         else:
             dataset = KGCDataset(args, kgdata, tokenizer)
