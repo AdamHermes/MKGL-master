@@ -198,19 +198,20 @@ class PNALayer(MessagePassing):
                 scaled_features.append(scaled_feat)
         
         # Concatenate all 12 scaled features: [N, D * 12]
-        update = torch.cat(scaled_features, dim=-1)  # [N, D * 12]
+        update = (features.unsqueeze(-1) * scales.unsqueeze(-2)).flatten(-2)
         
         return update
 
-    def combine(self, input, update):
-        # input: [N, D]
-        # update: [N, D*12]
-        # cat: [N, D*13]
-        output = self.linear(torch.cat([input, update], dim=-1))
+    def update(self, aggr_out, x):
+        """
+        aggr_out: [num_nodes, input_dim * 12] for PNA
+        x: [num_nodes, input_dim] (original features which include boundary)
+        """
+        # This now correctly produces input_dim * 13 total
+        output = self.linear(torch.cat([x, aggr_out], dim=-1))
         
         if self.layer_norm:
             output = self.layer_norm(output)
-            
         if self.activation:
             output = self.activation(output)
             
