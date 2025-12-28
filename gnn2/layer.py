@@ -60,18 +60,14 @@ class MLP(nn.Module):
 
 
 
-
 class PNALayer(MessagePassing):
-    """
-    PNA Layer converted from TorchDrug to PyTorch Geometric.
-    Maintains the exact same logic and aggregation functions.
-    """
-    
-    def __init__(self, input_dim, output_dim, num_relation, query_input_dim, 
-                 message_func="distmult", aggregate_func="pna", layer_norm=False, 
-                 activation="relu", dependent=True):
-        super(PNALayer, self).__init__(aggr=None)  # We'll handle aggregation manually
+    def __init__(self, input_dim, output_dim, num_relation, query_input_dim,
+                 message_func="distmult", aggregate_func="pna",
+                 layer_norm=False, activation="relu", dependent=True, **kwargs):
         
+        # Set aggr=None because we handle the specific PNA aggregation (mean/max/min/std) manually
+        super().__init__(aggr=None, node_dim=0)
+
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.num_relation = num_relation
@@ -80,193 +76,142 @@ class PNALayer(MessagePassing):
         self.aggregate_func = aggregate_func
         self.dependent = dependent
 
+        # 1. Normalization & Activation
         if layer_norm:
             self.layer_norm = nn.LayerNorm(output_dim)
         else:
             self.layer_norm = None
-            
+
         if isinstance(activation, str):
             self.activation = getattr(F, activation)
         else:
             self.activation = activation
 
-        # Output projection based on aggregation type
+        # 2. Aggregation Projection (Input * 13 explained: 1 self + 4 aggr * 3 scalers)
         if self.aggregate_func == "pna":
             self.linear = nn.Linear(input_dim * 13, output_dim)
         else:
             self.linear = nn.Linear(input_dim * 2, output_dim)
-            
-        # Relation embeddings
+
+        # 3. Relation Projection
         if dependent:
+            # Projects query embedding to relation weights
             self.relation_linear = nn.Linear(query_input_dim, num_relation * 2 * input_dim)
         else:
             self.relation = nn.Embedding(num_relation * 2, input_dim)
 
     def forward(self, graph, input):
-        """
-        Args:
-            graph: PyG Data or Batch object with:
-                - edge_index: [2, num_edges]
-                - edge_attr: [num_edges] (relation types)
-                - query: [batch_size, query_input_dim] or [num_nodes, query_input_dim]
-                - boundary: [num_nodes, input_dim] (initial node features)
-                - batch: [num_nodes] (batch assignment for each node)
-                - pna_degree_out: [num_nodes] (optional, precomputed out-degrees)
-            input: [num_nodes, input_dim] - current node features
-        """
-        batch_size = graph.query.size(0)
+        # Setup inputs
+        edge_index = graph.edge_index
+        edge_attr = graph.edge_attr 
         
-        # Flatten input if needed
-        if input.dim() > 2:
-            input = input.flatten(1)
-        if graph.boundary.dim() > 2:
-            boundary = graph.boundary.flatten(1)
-        else:
-            boundary = graph.boundary
-            
-        # Get edge information
-        edge_index = graph.edge_index  # [2, num_edges]
-        edge_type = graph.edge_attr if hasattr(graph, 'edge_attr') else graph.edge_type  # [num_edges]
-        
-        # Compute degrees
-        node_out = edge_index[0]
-        degree_out = getattr(graph, "pna_degree_out", None)
-        if degree_out is None:
-            degree_out = scatter(torch.ones_like(node_out, dtype=torch.float), 
-                               node_out, dim=0, dim_size=graph.num_nodes, reduce='sum')
-        degree_out = degree_out.unsqueeze(-1) + 1
-        
-        # Get relation embeddings
+        # 1. Calculate Relation Input (The "Message" Weight)
         if self.dependent:
-            # Query-dependent relation embeddings
-            relation_input = self.relation_linear(graph.query).view(
-                batch_size, self.num_relation * 2, self.input_dim
-            )
-            # Expand relation embeddings for each edge based on batch assignment
-            if hasattr(graph, 'batch'):
-                # For batched graphs, adjust edge types by batch offset
-                edge_batch = graph.batch[edge_index[0]]
-                edge_type_offset = edge_type + self.num_relation * 2 * edge_batch
-                relation_input = relation_input.flatten(0, 1)  # [batch_size * num_relation * 2, input_dim]
-                edge_relation = relation_input[edge_type_offset]
+            # Shape: [Batch_Size, Num_Rel*2, Input_Dim]
+            rel_weights = self.relation_linear(graph.query).view(-1, self.num_relation * 2, self.input_dim)
+            
+            # Map edges to the correct graph in the batch
+            if hasattr(graph, 'batch') and graph.batch is not None:
+                edge_batch_idx = graph.batch[edge_index[0]]
             else:
-                # Single graph case
-                edge_relation = relation_input[0, edge_type]
+                edge_batch_idx = torch.zeros(edge_index.size(1), dtype=torch.long, device=edge_index.device)
+            
+            # Gather specific relation weights for each edge
+            # shape: [Num_Edges, Input_Dim]
+            relation_input = rel_weights[edge_batch_idx, edge_attr]
         else:
-            # Fixed relation embeddings
-            if hasattr(graph, 'batch'):
-                edge_batch = graph.batch[edge_index[0]]
-                edge_type_offset = edge_type + self.num_relation * 2 * edge_batch
-                relation_input = self.relation.weight.expand(batch_size, -1, -1).flatten(0, 1)
-                edge_relation = relation_input[edge_type_offset]
-            else:
-                edge_relation = self.relation.weight[edge_type]
-        
-        # Perform message passing and aggregation
-        update = self.message_and_aggregate(
-            edge_index, edge_relation, input, boundary, degree_out, graph
-        )
-        
-        # Combine with input
-        output = self.combine(input, update)
-        
-        return output
+            # Independent: Simple embedding lookup
+            relation_input = self.relation(edge_attr)
 
-    def message_and_aggregate(self, edge_index, edge_relation, input, boundary, degree_out, graph):
-        """
-        Compute messages and aggregate them using the specified aggregation function.
-        This replicates the rspmm operations from TorchDrug.
-        """
-        node_in = edge_index[0]  # source nodes
-        node_out = edge_index[1]  # target nodes
+        # 2. Propagate
+        # We pass 'input' as 'boundary' so it is available in aggregate() for the self-loop logic
+        out = self.propagate(edge_index, x=input, relation_input=relation_input, 
+                             boundary=input, 
+                             pna_degree_out=graph.pna_degree_out,
+                             pna_degree_mean=getattr(graph, "pna_degree_mean", None))
+                             
+        # 3. Combine (Final Projection)
+        out = self.combine(input, out)
+        return out
+
+    def message(self, x_j, relation_input):
+        # TorchDrug: mul="mul" -> Element-wise multiplication
+        return x_j * relation_input
+
+    def aggregate(self, inputs, index, boundary, pna_degree_out, pna_degree_mean=None, dim_size=None):
+        # inputs: Messages [Num_Edges, Input_Dim]
+        # boundary: Target Node Features [Num_Nodes, Input_Dim]
+
+        # Keep scatter outputs aligned with boundary rows
+        if dim_size is None:
+            dim_size = boundary.size(0)
+
+        # Compute degree directly from edge index (safest approach)
+        degree_from_edges = scatter(torch.ones(index.size(0), device=index.device), 
+                                    index, dim=0, dim_size=dim_size, reduce='sum')
         
-        # Get edge weights if available
-        edge_weight = getattr(graph, 'edge_weight', None)
-        if edge_weight is None:
-            edge_weight = torch.ones(edge_index.size(1), device=edge_index.device)
+        # --- A. Aggregators ---
+        # 1. Sum
+        sum_agg = scatter(inputs, index, dim=0, dim_size=dim_size, reduce='sum')
         
-        # Type conversion to match input dtype
-        edge_relation = edge_relation.type(input.dtype)
+        # 2. Sq Sum (for Std)
+        sq_sum_agg = scatter(inputs ** 2, index, dim=0, dim_size=dim_size, reduce='sum')
         
-        # Compute messages: relation_embedding * source_node_features * edge_weight
-        # This replicates: generalized_rspmm(adjacency, relation_input, input, sum="add", mul="mul")
-        messages = edge_relation * input[node_in] * edge_weight.unsqueeze(-1)
+        # 3. Max & Min
+        max_agg = scatter(inputs, index, dim=0, dim_size=dim_size, reduce='max')
+        min_agg = scatter(inputs, index, dim=0, dim_size=dim_size, reduce='min')
         
-        if self.aggregate_func == "sum":
-            # Sum aggregation
-            update = scatter(messages, node_out, dim=0, dim_size=graph.num_nodes, reduce='sum')
-            update = update + boundary
+        # --- B. Combine with Boundary (Self-Loop Logic) ---
+        # degree = degree_out + 1 (includes self)
+        degree = degree_from_edges.unsqueeze(-1) + 1  # [N, 1]
+        
+        mean = (sum_agg + boundary) / degree
+        sq_mean = (sq_sum_agg + boundary ** 2) / degree
+        std = (sq_mean - mean ** 2).clamp(min=1e-6).sqrt()
+        
+        max_feat = torch.max(max_agg, boundary)
+        min_feat = torch.min(min_agg, boundary)
+        
+        # features: list of [N, D] tensors, 4 total
+        features = [mean, max_feat, min_feat, std]  # Each is [N, D]
+        
+        # --- C. Scaling ---
+        scale = degree.log()
+        
+        if pna_degree_mean is None:
+            pna_degree_mean = scale.mean()
             
-        elif self.aggregate_func == "mean":
-            # Mean aggregation
-            update = scatter(messages, node_out, dim=0, dim_size=graph.num_nodes, reduce='sum')
-            update = (update + boundary) / degree_out
-            
-        elif self.aggregate_func == "max":
-            # Max aggregation
-            update = scatter(messages, node_out, dim=0, dim_size=graph.num_nodes, reduce='max')
-            # Handle nodes with no incoming edges (scatter max returns -inf)
-            update = torch.where(torch.isinf(update), boundary, update)
-            update = torch.max(update, boundary)
-            
-        elif self.aggregate_func == "pna":
-            # PNA aggregation: multiple aggregators and scalers
-            
-            # 1. Sum aggregation
-            sum_agg = scatter(messages, node_out, dim=0, dim_size=graph.num_nodes, reduce='sum')
-            
-            # 2. Squared sum for variance computation
-            messages_sq = (edge_relation ** 2) * (input[node_in] ** 2) * (edge_weight.unsqueeze(-1) ** 2)
-            sq_sum = scatter(messages_sq, node_out, dim=0, dim_size=graph.num_nodes, reduce='sum')
-            
-            # 3. Max aggregation
-            max_agg = scatter(messages, node_out, dim=0, dim_size=graph.num_nodes, reduce='max')
-            max_agg = torch.where(torch.isinf(max_agg), boundary, max_agg)
-            
-            # 4. Min aggregation
-            min_agg = scatter(messages, node_out, dim=0, dim_size=graph.num_nodes, reduce='min')
-            min_agg = torch.where(torch.isinf(min_agg), boundary, min_agg)
-            
-            # Compute statistics
-            mean = (sum_agg + boundary) / degree_out
-            sq_mean = (sq_sum + boundary ** 2) / degree_out
-            max_val = torch.max(max_agg, boundary)
-            min_val = torch.min(min_agg, boundary)
-            std = (sq_mean - mean ** 2).clamp(min=1e-6).sqrt()
-            
-            # Stack features: [mean, max, min, std]
-            features = torch.cat([
-                mean.unsqueeze(-1), 
-                max_val.unsqueeze(-1), 
-                min_val.unsqueeze(-1), 
-                std.unsqueeze(-1)
-            ], dim=-1)
-            features = features.flatten(-2)  # [num_nodes, input_dim * 4]
-            
-            # Degree scalers: [1, log(degree), 1/log(degree)]
-            scale = degree_out.log()
-            degree_mean = getattr(graph, "pna_degree_mean", scale.mean())
-            scale = scale / degree_mean
-            scales = torch.cat([
-                torch.ones_like(scale), 
-                scale, 
-                1 / scale.clamp(min=1e-2)
-            ], dim=-1)  # [num_nodes, 3]
-            
-            # Apply scalers: features [num_nodes, input_dim * 4, 1] * scales [num_nodes, 1, 3]
-            update = (features.unsqueeze(-1) * scales.unsqueeze(-2)).flatten(-2)
-            # Result: [num_nodes, input_dim * 4 * 3] = [num_nodes, input_dim * 12]
-            
-        else:
-            raise ValueError("Unknown aggregation function `%s`" % self.aggregate_func)
+        scale = scale / pna_degree_mean
+        
+        # scales: [N, 3] - identity, amplification, attenuation
+        scales = torch.cat([torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)
+        
+        # --- D. Apply Scaling ---
+        # For each feature [N, D], multiply by each scale [N, 1] -> get 3 scaled versions
+        # Result: 4 features * 3 scales = 12 feature sets, each [N, D]
+        # Final update: [N, D * 12]
+        
+        scaled_features = []
+        for feat in features:  # feat: [N, D]
+            for s in range(3):  # 3 scalers
+                scaled_feat = feat * scales[:, s:s+1]  # [N, D] * [N, 1] -> [N, D]
+                scaled_features.append(scaled_feat)
+        
+        # Concatenate all 12 scaled features: [N, D * 12]
+        update = torch.cat(scaled_features, dim=-1)  # [N, D * 12]
         
         return update
 
     def combine(self, input, update):
-        """Combine input features with aggregated updates."""
+        # input: [N, D]
+        # update: [N, D*12]
+        # cat: [N, D*13]
         output = self.linear(torch.cat([input, update], dim=-1))
+        
         if self.layer_norm:
             output = self.layer_norm(output)
+            
         if self.activation:
             output = self.activation(output)
+            
         return output
