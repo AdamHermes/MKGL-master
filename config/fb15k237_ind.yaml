@@ -40,8 +40,8 @@ trainer:
   save_strategy: 'no' #epoch
   warmup_steps: 50
   bf16: yes
-  # logging_steps: 10
-  logging_strategy: epoch
+  logging_steps: 5
+  logging_strategy: steps
   learning_rate: 5.0e-3
   gradient_accumulation_steps: 4
   eval_accumulation_steps: 64

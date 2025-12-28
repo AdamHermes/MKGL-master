@@ -2,6 +2,24 @@
 import torch
 
 
+def to_undirected_with_inverse(edge_index, edge_attr, num_relations):
+    """
+    Mimics TorchDrug's graph.undirected(add_inverse=True)
+    1. Flips edges (h, t) -> (t, h)
+    2. Creates inverse relations: r -> r + num_relations
+    """
+    # 1. Create inverse edges (flip source and target)
+    edge_index_inv = torch.stack([edge_index[1], edge_index[0]], dim=0)
+    
+    # 2. Create inverse relations (shift IDs by num_relations)
+    # Assuming edge_attr contains relation IDs
+    edge_attr_inv = edge_attr + num_relations
+    
+    # 3. Concatenate original and inverse
+    new_edge_index = torch.cat([edge_index, edge_index_inv], dim=1)
+    new_edge_attr = torch.cat([edge_attr, edge_attr_inv], dim=0)
+    
+    return new_edge_index, new_edge_attr
 def multikey_argsort(inputs, descending=False, break_tie=False):
     if break_tie:
         order = torch.randperm(len(inputs[0]), device=inputs[0].device)

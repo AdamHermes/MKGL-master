@@ -138,11 +138,14 @@ class ConditionedPNA(PNA):
         return score
 
     def aggregate(self, graph, h_index, r_index, input_embeds, rel_embeds, init_score):
-        query = rel_embeds
+        batch_size = len(rel_embeds)  # 32
+        
+        query = rel_embeds  # [32, 32]
         boundary, score = input_embeds, init_score
         hidden = boundary.clone()
         
-        graph.query = query
+        # Store query as [batch_size, dim], NOT expanded
+        graph.query = query  # [32, 32] ✓
         graph.boundary = boundary
         graph.hidden = hidden
         graph.score = score
@@ -150,124 +153,154 @@ class ConditionedPNA(PNA):
         graph.node_id = torch.arange(graph.num_nodes, device=h_index.device)
         
         graph.degree_out = degree(graph.edge_index[0], graph.num_nodes)
-        graph.pna_degree_out = graph.degree_out
+        graph.pna_degree_out = graph.degree_out.unsqueeze(-1)  # Add this!
 
         pna_degree_mean = (graph.degree_out + 1).log().mean()
-        #print("\n--- START AGGREGATE ---")
-        #print_stat("Aggregate: Init Score", graph.score)
+        
+        # Add this for proper batch detection
+        graph.num_graphs = batch_size
 
         for i, layer in enumerate(self.layers):
-            #print(f"\n--- LAYER {i} START ---")
-            #print_stat(f"Layer {i}: graph.score (Start of Loop)", graph.score)
-            
-            # If this prints -62k, the corruption happened in init_input_embeds or passed init_score
-            
             edge_id_subset = self.select_edges(graph, graph.score)
             
-            # ... inside your aggregate loop ...
+            if len(edge_id_subset) == 0:
+                continue
             
             sub_edge_index = graph.edge_index[:, edge_id_subset]
-            sub_edge_attr = graph.edge_attr[edge_id_subset] if graph.edge_attr is not None else None
+            sub_edge_attr = graph.edge_attr[edge_id_subset] if hasattr(graph, 'edge_attr') and graph.edge_attr is not None else None
             
-            # --- INSERT THIS DEBUG BLOCK ---
             if sub_edge_attr is not None:
                 max_val = sub_edge_attr.max().item()
                 limit = self.num_relation * 2
-                #print(f"DEBUG: Layer {i} | Edge Attr Max: {max_val} | Limit: {limit}")
-                
                 if max_val >= limit:
-                    # This print proves the config is the issue, not the subgraph code
-                    print(f"!!! CRASH DETECTED !!!")
-                    print(f"You have a Relation ID {max_val} but only configured {limit} slots.")
-                    print(f"Your 'sub_edge_attr' logic is correct, but the DATA is out of bounds.")
-                    # We exit explicitly to avoid the confusing CUDA error
-                    import sys; sys.exit(1)
-            # -------------------------------
-
-            unique_nodes, new_edge_index = sub_edge_index.unique(return_inverse=True)
-            # ... continue ...
+                    raise ValueError(f"Relation ID {max_val} exceeds limit {limit}")
             
-            subgraph = Data(edge_index=new_edge_index, edge_attr=sub_edge_attr)
-            subgraph.num_nodes = unique_nodes.size(0)
+            unique_nodes, new_edge_index = sub_edge_index.unique(return_inverse=True)
+            new_edge_index = new_edge_index.reshape(2, -1)
+            
+            subgraph = Data(
+                edge_index=new_edge_index,
+                edge_type=sub_edge_attr,  # Use edge_type, not edge_attr
+                num_nodes=unique_nodes.size(0)
+            )
+            
+            # Set edge_attr as well for compatibility
+            if sub_edge_attr is not None:
+                subgraph.edge_attr = sub_edge_attr
             
             subgraph.score = graph.score[unique_nodes]
             subgraph.hidden = graph.hidden[unique_nodes]
             subgraph.degree_out = graph.degree_out[unique_nodes]
-            subgraph.query = graph.query[graph.batch[unique_nodes]]
-            subgraph.batch = graph.batch[unique_nodes]
-            subgraph.pna_degree_out = subgraph.degree_out
-            subgraph.node_id = graph.node_id[unique_nodes]
+            subgraph.boundary = graph.boundary[unique_nodes]
+            subgraph.pna_degree_out = subgraph.degree_out.unsqueeze(-1)
             subgraph.pna_degree_mean = pna_degree_mean
             
-            # Gating mechanism: check if sigmoid is saturating due to high score
-            gate = F.sigmoid(subgraph.score).unsqueeze(-1)
-            #print_stat(f"Layer {i}: Gate (Sigmoid output)", gate)
+            # CRITICAL FIX: Keep query as [batch_size, dim], don't expand per-node
+            subgraph.query = graph.query  # [32, 32] ✓ NOT per-node!
             
+            # But store node-to-batch mapping for message passing
+            subgraph.batch = graph.batch[unique_nodes]
+            subgraph.node2graph = subgraph.batch  # For relation lookup
+            subgraph.node_id = unique_nodes
+            subgraph.num_graphs = batch_size  # For batch size detection
+            
+            # Gating
+            gate = F.sigmoid(subgraph.score).unsqueeze(-1)
             layer_input = gate * subgraph.hidden
             
+            # Run layer
             hidden_out = layer(subgraph, layer_input.type(torch.float32))
             
+            # Update nodes with outgoing edges
             out_mask = subgraph.degree_out > 0
-            active_original_ids = unique_nodes[out_mask]
+            active_subgraph_indices = torch.nonzero(out_mask, as_tuple=True)[0]
             
-            # Update Hidden
-            prev_hidden = graph.hidden[active_original_ids]
-            update_delta = hidden_out[out_mask]
+            if len(active_subgraph_indices) == 0:
+                continue
             
-            # Check for explosion in hidden states (often causes score explosion next)
+            active_original_ids = unique_nodes[active_subgraph_indices]
+            update_delta = hidden_out[active_subgraph_indices]
+            
             if update_delta.abs().max() > 100:
                 print(f"WARNING: Layer {i} hidden update delta is large!")
-                print_stat(f"Layer {i}: Update Delta", update_delta)
-                
+                update_delta = torch.clamp(update_delta, -10, 10)
+            
+            prev_hidden = graph.hidden[active_original_ids]
             graph.hidden[active_original_ids] = (prev_hidden + update_delta).type(graph.hidden.dtype)
-            #print_stat(f"Layer {i}: Updated Hidden (Subset)", graph.hidden[active_original_ids])
-
+            
+            # CRITICAL: Use graph.query indexed by batch, not subgraph.query
             batch_idx = graph.batch[active_original_ids]
+            query_for_nodes = graph.query[batch_idx]  # [num_active, 32]
             
-            # Update Score
-            #print(f"DEBUG: Layer {i} | Calculating new scores...")
-            new_scores = self.score(graph.hidden[active_original_ids], graph.query[batch_idx])
+            new_scores = self.score(graph.hidden[active_original_ids], query_for_nodes)
             
-            # Track the new scores BEFORE they go back into the graph
-            #print_stat(f"Layer {i}: New Scores Calculated", new_scores)
+            if new_scores.abs().max() > 100:
+                print(f"WARNING: Layer {i} - Score explosion!")
             
             graph.score[active_original_ids] = new_scores.type(graph.score.dtype)
 
-        #print("--- END AGGREGATE ---\n")
         return graph.score
 
+
+
     def init_input_embeds(self, graph, head_embeds, head_index, tail_embeds, tail_index, rel_embeds):
+        
+        
         if tail_embeds.dtype != head_embeds.dtype:
             tail_embeds = tail_embeds.to(head_embeds.dtype)
 
         batch_size = rel_embeds.size(0)
+        
+        # POTENTIAL ERROR #11: This logic seems wrong
+        # You're repeating tail_embeds batch_size times, but that gives you
+        # [num_entities * batch_size, hidden_dim] which might not match graph.num_nodes
         input_embeds_full = tail_embeds.repeat(batch_size, 1)
         
+        # CRITICAL ERROR #12: This check always fails and does nothing
         if input_embeds_full.size(0) != graph.num_nodes:
-             input_embeds_full = tail_embeds.repeat(batch_size, 1)
+            input_embeds_full = tail_embeds.repeat(batch_size, 1)  # This does the same thing again!
 
+        # POTENTIAL ERROR #13: head_index might be out of bounds
+        if head_index.max() >= input_embeds_full.size(0):
+            print(f"CRITICAL ERROR: head_index max ({head_index.max()}) >= input_embeds size ({input_embeds_full.size(0)})")
+        
         input_embeds_full[head_index] = head_embeds
 
+        # POTENTIAL ERROR #14: expanded_query dimension mismatch
+        if not hasattr(graph, 'batch'):
+            print(f"ERROR: graph has no batch attribute!")
+        else:
+            print(f"Expanding query using graph.batch")
+            print(f"  graph.batch shape: {graph.batch.shape}, min: {graph.batch.min()}, max: {graph.batch.max()}")
+            print(f"  rel_embeds shape: {rel_embeds.shape}")
+            
+            if graph.batch.max() >= batch_size:
+                print(f"ERROR: graph.batch max ({graph.batch.max()}) >= batch_size ({batch_size})")
+            
         expanded_query = rel_embeds[graph.batch]
+        print(f"expanded_query shape: {expanded_query.shape}")
+        
         zero_embeds = torch.zeros(graph.num_nodes, rel_embeds.shape[1], 
                                   device=rel_embeds.device, dtype=rel_embeds.dtype)
+        print(f"zero_embeds shape: {zero_embeds.shape}")
         
-        #print("\nDEBUG: init_input_embeds calc start")
+        # POTENTIAL ERROR #15: Dimension mismatch in score calculation
+        print(f"Calculating score with zero_embeds and expanded_query")
         score_all = self.score(zero_embeds, expanded_query)
-        #print_stat("init_input_embeds: Raw Score (Zero Embeds)", score_all)
+        print(f"score_all shape: {score_all.shape}")
         
         score_head = self.score(head_embeds, rel_embeds)
-        #print_stat("init_input_embeds: Raw Score (Head Embeds)", score_head)
+        print(f"score_head shape: {score_head.shape}")
+        
+        # POTENTIAL ERROR #16: head_index might be out of bounds for score_all
+        if head_index.max() >= score_all.size(0):
+            print(f"ERROR: head_index max ({head_index.max()}) >= score_all size ({score_all.size(0)})")
         
         score_all[head_index] = score_head
         
-        # Check before clamp
-        #print_stat("init_input_embeds: Score All (Pre-Clamp)", score_all)
-        
         score_all = torch.clamp(score_all, min=-15, max=15)
-        
-        # Check after clamp
-        #print_stat("init_input_embeds: Score All (Post-Clamp)", score_all)
+        print(f"Final score_all shape: {score_all.shape}, min: {score_all.min()}, max: {score_all.max()}")
+        print(f"=== init_input_embeds END ===\n")
             
         return input_embeds_full, score_all
 
