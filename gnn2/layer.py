@@ -67,8 +67,6 @@ class PNALayer(MessagePassing):
         dependent=True,
     ):
         super(PNALayer, self).__init__(aggr=None, node_dim=0)
-        layer_norm = True if layer_norm == "yes" else False
-        dependent = True if dependent == "yes" else False
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.num_relation = num_relation

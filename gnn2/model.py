@@ -177,10 +177,8 @@ class ConditionedPNA(PNA):
             hidden_out = layer(subgraph, layer_input.type(torch.float32))
             out_mask = subgraph.degree_out > 0
             node_out = subgraph.node_id[out_mask]
-            update_delta = hidden_out[out_mask]
-            if self.training:
-                update_delta = torch.clamp(update_delta, min=-5.0, max=5.0)
-            graph.hidden[node_out] = (graph.hidden[node_out] + update_delta).type(graph.hidden[node_out].dtype)
+            
+            graph.hidden[node_out] = (graph.hidden[node_out] + hidden_out[out_mask]).type(graph.hidden[node_out].dtype)
             
             index = graph.node2graph[node_out]
             
