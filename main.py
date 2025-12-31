@@ -33,6 +33,13 @@ if __name__ == "__main__":
                         default='')
     parser.add_argument("--seed", "-s", type=str,
                         default=42)
+    # Ablation flags for semantic attention
+    parser.add_argument("--disable_semantic", action="store_true",
+                        help="Disable semantic attention module (for ablation testing)")
+    parser.add_argument("--semantic_k", type=int, default=None,
+                        help="Override number of semantic neighbors (k)")
+    parser.add_argument("--semantic_threshold", type=float, default=None,
+                        help="Override semantic similarity threshold")
     args = parser.parse_args()
     accelerator = Accelerator()
     rank = accelerator.process_index
@@ -40,6 +47,29 @@ if __name__ == "__main__":
         cfg = easydict.EasyDict(yaml.safe_load(f))
         if args.version:
             cfg.dataset.version = args.version
+    
+    # Apply ablation overrides
+    if args.disable_semantic:
+        if 'semantic_attention' not in cfg:
+            cfg.semantic_attention = easydict.EasyDict({})
+        cfg.semantic_attention.use = False
+        if rank == 0:
+            print("[Main] Semantic attention DISABLED via --disable_semantic flag")
+    
+    if args.semantic_k is not None:
+        if 'semantic_attention' not in cfg:
+            cfg.semantic_attention = easydict.EasyDict({})
+        cfg.semantic_attention.k = args.semantic_k
+        if rank == 0:
+            print(f"[Main] Semantic k overridden to: {args.semantic_k}")
+    
+    if args.semantic_threshold is not None:
+        if 'semantic_attention' not in cfg:
+            cfg.semantic_attention = easydict.EasyDict({})
+        cfg.semantic_attention.threshold = args.semantic_threshold
+        if rank == 0:
+            print(f"[Main] Semantic threshold overridden to: {args.semantic_threshold}")
+    
     torch.manual_seed(args.seed + rank)
 
     config_name = args.config.split('/')[-1].split('.')[0]
@@ -75,8 +105,26 @@ if __name__ == "__main__":
     lora_config = LoraConfig(**cfg.loraconfig)
     model = get_peft_model(model, lora_config)
 
+    # Determine semantic neighbors file path
+    semantic_neighbors_path = None
+    semantic_cfg = cfg.get('semantic_attention', {})
+    if semantic_cfg.get('use', False):
+        # Try config-specified path first, then auto-detect
+        if semantic_cfg.get('neighbors_file'):
+            semantic_neighbors_path = semantic_cfg.neighbors_file
+        else:
+            # Auto-detect based on config name
+            semantic_neighbors_path = f'data/semantic_neighbors_{args.config_name}.pt'
+        
+        if rank == 0:
+            if os.path.exists(semantic_neighbors_path):
+                print(f"[Main] Found semantic neighbors file: {semantic_neighbors_path}")
+            else:
+                print(f"[Main] Warning: Semantic neighbors file not found: {semantic_neighbors_path}")
+                print(f"[Main] Run: python scripts/build_semantic_index.py --config {args.config}")
+
     kgl2token = torch.tensor(np.stack(dataset.vocab_df.text_token_ids)[:, :cfg.kgl_token_length])     
-    model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg) 
+    model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg, semantic_neighbors_path=semantic_neighbors_path) 
     
     if rank == 0:
         print(model.print_trainable_parameters())

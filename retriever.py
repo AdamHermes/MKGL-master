@@ -1,9 +1,238 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+import math
 #from torchdrug import core
 from gnn2.model import *
 from gnn2.layer import PNALayer
+
+
+class SemanticAttentionModule(nn.Module):
+    """
+    Dynamic Semantic Attention Module.
+    
+    Enriches head entity representations with semantically similar entities
+    using precomputed sparse semantic adjacency (from FAISS offline index).
+    
+    This module:
+    1. Retrieves top-K semantic neighbors for input entities from sparse matrix
+    2. Computes attention weights using dot-product + precomputed similarity scores
+    3. Aggregates neighbor features via weighted sum
+    4. Blends with original representation via learnable gate
+    """
+    
+    def __init__(self, config, hidden_dim):
+        """
+        Args:
+            config: Semantic attention config with keys:
+                - k: Number of semantic neighbors to use
+                - threshold: Minimum similarity (already applied during index build)
+                - temperature: Softmax temperature for attention
+                - gate_init: Initial value for blending gate
+                - score_weight: Weight for precomputed similarity in attention
+            hidden_dim: Dimension of hidden states (e.g., 2048 for TinyLlama)
+        """
+        super().__init__()
+        self.config = config
+        self.hidden_dim = hidden_dim
+        self.k = config.get('k', 10)
+        self.temperature = config.get('temperature', 1.0)
+        self.score_weight = config.get('score_weight', 0.5)
+        
+        # Learnable blending gate: alpha * original + (1-alpha) * semantic
+        gate_init = config.get('gate_init', 0.1)
+        self.gate = nn.Parameter(torch.tensor([gate_init]))
+        
+        # Optional: projection layers for attention computation
+        self.use_projection = config.get('use_projection', False)
+        if self.use_projection:
+            proj_dim = config.get('proj_dim', 256)
+            self.query_proj = nn.Linear(hidden_dim, proj_dim, bias=False)
+            self.key_proj = nn.Linear(hidden_dim, proj_dim, bias=False)
+            self.value_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        
+        # Semantic adjacency (loaded externally)
+        self.register_buffer('semantic_indices', None)  # [num_entities, max_k]
+        self.register_buffer('semantic_scores', None)   # [num_entities, max_k]
+        self.num_entities = 0
+        self.max_k = 0
+    
+    def load_semantic_neighbors(self, semantic_adj_path):
+        """
+        Load precomputed semantic neighbors from file.
+        
+        Args:
+            semantic_adj_path: Path to .pt file with semantic adjacency
+        """
+        data = torch.load(semantic_adj_path, map_location='cpu')
+        
+        self.semantic_indices = data['dense_indices']  # [num_entities, max_k]
+        self.semantic_scores = data['dense_scores']    # [num_entities, max_k]
+        self.num_entities = data['num_entities']
+        self.max_k = self.semantic_indices.shape[1]
+        
+        print(f"[SemanticAttention] Loaded {self.num_entities} entities, max_k={self.max_k}")
+    
+    def set_semantic_neighbors(self, indices, scores, num_entities):
+        """
+        Set semantic neighbors directly (for dynamic loading).
+        
+        Args:
+            indices: [num_entities, max_k] - neighbor indices (-1 for padding)
+            scores: [num_entities, max_k] - similarity scores
+            num_entities: Number of entities
+        """
+        self.semantic_indices = indices
+        self.semantic_scores = scores
+        self.num_entities = num_entities
+        self.max_k = indices.shape[1]
+    
+    def get_semantic_neighbors(self, entity_ids, k=None):
+        """
+        Retrieve top-k semantic neighbors for given entities.
+        
+        Args:
+            entity_ids: [batch_size] or [batch_size, num_candidates] entity IDs
+            k: Number of neighbors (default: self.k)
+        
+        Returns:
+            neighbor_ids: [batch_size, k] or [batch_size, num_candidates, k]
+            neighbor_scores: Same shape, similarity scores
+            valid_mask: Same shape, True for valid neighbors
+        """
+        if self.semantic_indices is None:
+            raise RuntimeError("Semantic neighbors not loaded. Call load_semantic_neighbors() first.")
+        
+        k = k or self.k
+        k = min(k, self.max_k)
+        
+        device = entity_ids.device
+        original_shape = entity_ids.shape
+        entity_ids_flat = entity_ids.view(-1)
+        
+        # Clamp to valid range
+        entity_ids_clamped = entity_ids_flat.clamp(0, self.num_entities - 1)
+        
+        # Lookup neighbors
+        indices = self.semantic_indices.to(device)
+        scores = self.semantic_scores.to(device)
+        
+        neighbor_ids = indices[entity_ids_clamped, :k]  # [flat_batch, k]
+        neighbor_scores = scores[entity_ids_clamped, :k]
+        
+        # Valid mask: neighbor_id != -1
+        valid_mask = neighbor_ids >= 0
+        
+        # Reshape back
+        if len(original_shape) > 1:
+            neighbor_ids = neighbor_ids.view(*original_shape, k)
+            neighbor_scores = neighbor_scores.view(*original_shape, k)
+            valid_mask = valid_mask.view(*original_shape, k)
+        
+        return neighbor_ids, neighbor_scores, valid_mask
+    
+    def forward(self, entity_ids, hidden_states, all_entity_embeddings, 
+                return_attention=False):
+        """
+        Compute semantic-enriched representations.
+        
+        Args:
+            entity_ids: [batch_size] - head entity IDs
+            hidden_states: [batch_size, hidden_dim] - LLM hidden states for heads
+            all_entity_embeddings: [num_entities, embed_dim] - all entity embeddings
+            return_attention: Whether to return attention weights
+        
+        Returns:
+            enriched_hidden: [batch_size, hidden_dim] - semantically enriched states
+            attention_weights: (optional) [batch_size, k] - attention weights
+        """
+        if self.semantic_indices is None or self.k == 0:
+            # No semantic neighbors: return original
+            if return_attention:
+                return hidden_states, None
+            return hidden_states
+        
+        batch_size = entity_ids.shape[0]
+        device = hidden_states.device
+        
+        # Get semantic neighbors
+        neighbor_ids, precomputed_scores, valid_mask = self.get_semantic_neighbors(entity_ids)
+        # neighbor_ids: [batch_size, k]
+        # precomputed_scores: [batch_size, k]
+        # valid_mask: [batch_size, k]
+        
+        # Replace invalid (-1) with 0 for embedding lookup (will be masked)
+        neighbor_ids_safe = neighbor_ids.clamp(min=0)
+        
+        # Get neighbor embeddings
+        neighbor_embeddings = all_entity_embeddings[neighbor_ids_safe]  # [batch, k, embed_dim]
+        
+        # Compute attention scores
+        if self.use_projection:
+            # Project to attention space
+            queries = self.query_proj(hidden_states)  # [batch, proj_dim]
+            keys = self.key_proj(neighbor_embeddings)  # [batch, k, proj_dim]
+            
+            # Scaled dot-product attention
+            attn_scores = torch.bmm(keys, queries.unsqueeze(-1)).squeeze(-1)  # [batch, k]
+            attn_scores = attn_scores / math.sqrt(keys.shape[-1])
+        else:
+            # Simple dot-product with dimension matching
+            if hidden_states.shape[-1] != neighbor_embeddings.shape[-1]:
+                # Dimension mismatch: fallback to precomputed scores only
+                # This can happen if embeddings haven't been up-scaled
+                attn_scores = precomputed_scores
+            else:
+                attn_scores = torch.bmm(
+                    neighbor_embeddings, 
+                    hidden_states.unsqueeze(-1)
+                ).squeeze(-1)  # [batch, k]
+                attn_scores = attn_scores / math.sqrt(hidden_states.shape[-1])
+        
+        # Combine with precomputed similarity scores
+        combined_scores = (1 - self.score_weight) * attn_scores + self.score_weight * precomputed_scores
+        
+        # Apply temperature
+        combined_scores = combined_scores / self.temperature
+        
+        # Mask invalid neighbors
+        combined_scores = combined_scores.masked_fill(~valid_mask, float('-inf'))
+        
+        # Softmax attention
+        attention_weights = F.softmax(combined_scores, dim=-1)  # [batch, k]
+        
+        # Handle all-invalid case (set to zero)
+        all_invalid = ~valid_mask.any(dim=-1, keepdim=True)  # [batch, 1]
+        attention_weights = attention_weights.masked_fill(all_invalid, 0.0)
+        
+        # Aggregate neighbor features
+        if self.use_projection:
+            neighbor_values = self.value_proj(neighbor_embeddings)
+        else:
+            # Need to project neighbor embeddings to hidden_dim if different
+            if neighbor_embeddings.shape[-1] != self.hidden_dim:
+                # Dimension mismatch: skip aggregation, return original
+                if return_attention:
+                    return hidden_states, attention_weights
+                return hidden_states
+            neighbor_values = neighbor_embeddings
+        
+        # Weighted sum: [batch, k, hidden] * [batch, k, 1] -> [batch, hidden]
+        semantic_context = torch.bmm(
+            attention_weights.unsqueeze(1), 
+            neighbor_values
+        ).squeeze(1)  # [batch, hidden_dim]
+        
+        # Blend with original via gate
+        gate = torch.sigmoid(self.gate)
+        enriched_hidden = gate * hidden_states + (1 - gate) * semantic_context
+        
+        if return_attention:
+            return enriched_hidden, attention_weights
+        return enriched_hidden
+    
+    def extra_repr(self):
+        return f'k={self.k}, temperature={self.temperature}, score_weight={self.score_weight}'
 
 class BasePNARetriever(nn.Module): 
     '''

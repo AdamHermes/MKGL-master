@@ -98,3 +98,15 @@ score_retriever:
       dependent: yes
     num_layer: 6
     node_ratio: 1
+
+# Dynamic Semantic Attention Module
+semantic_attention:
+  use: yes                    # Enable/disable semantic attention
+  k: 10                       # Number of semantic neighbors to use
+  threshold: 0.5              # Min cosine similarity (applied during index build)
+  temperature: 1.0            # Softmax temperature for attention
+  gate_init: 0.1              # Initial blending gate value (0=all semantic, 1=all original)
+  score_weight: 0.5           # Weight for precomputed similarity in attention
+  use_projection: no          # Use projection layers for attention
+  proj_dim: 256               # Projection dimension if use_projection=yes
+  neighbors_file: null        # Path to semantic neighbors file (auto-detected if null)

@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from typing import List, Optional, Tuple, Union, OrderedDict
+import os
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -25,8 +26,9 @@ class MKGL(LlamaForCausalLM):
 
     def __init__(self, config):
         super().__init__(config)
+        self.semantic_attention = None  # Initialized in init_kg_specs
 
-    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg,):
+    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg, semantic_neighbors_path=None):
         self.kgl2token = kgl2token
         self.orig_vocab_size = orig_vocab_size
         
@@ -34,7 +36,34 @@ class MKGL(LlamaForCausalLM):
         self.context_retriever = ContextRetriever(cfg.context_retriever, self.get_input_embeddings().weight.data, kgl2token, orig_vocab_size).to(device)
         self.score_retriever = ScoreRetriever(cfg.score_retriever, self.lm_head.weight.data, kgl2token, orig_vocab_size).to(device)
 
-        # self._init_kg_score(len(kgl_vocab), r)
+        # Initialize Semantic Attention Module
+        self._init_semantic_attention(cfg, device, semantic_neighbors_path)
+
+    def _init_semantic_attention(self, cfg, device, semantic_neighbors_path=None):
+        """Initialize the Dynamic Semantic Attention module."""
+        semantic_cfg = cfg.get('semantic_attention', {})
+        
+        if not semantic_cfg.get('use', False):
+            print("[MKGL] Semantic attention disabled")
+            self.semantic_attention = None
+            return
+        
+        print("[MKGL] Initializing Semantic Attention Module...")
+        
+        # Create module
+        self.semantic_attention = SemanticAttentionModule(
+            config=semantic_cfg,
+            hidden_dim=self.config.hidden_size
+        ).to(device)
+        
+        # Load semantic neighbors
+        neighbors_file = semantic_cfg.get('neighbors_file', None) or semantic_neighbors_path
+        if neighbors_file and os.path.exists(neighbors_file):
+            self.semantic_attention.load_semantic_neighbors(neighbors_file)
+            print(f"[MKGL] Loaded semantic neighbors from {neighbors_file}")
+        else:
+            print(f"[MKGL] Warning: Semantic neighbors file not found: {neighbors_file}")
+            print("[MKGL] Semantic attention will be disabled until neighbors are loaded")
 
     def _init_kg_score(self, num_kg_tokens, ent_inter_emb_dim=64):
         device = self.lm_head.weight.device
@@ -115,6 +144,27 @@ class MKGL(LlamaForCausalLM):
         rel_hidden_states = hidden_states[torch.arange(
             batch_size, device=hidden_states.device), input_length-2]
 
+        # Apply Semantic Attention to enrich head entity representations
+        # This is done BEFORE score_retriever to inject semantic context into hidden states
+        # Score Retriever still uses structural-only graph (no semantic edges added to graph)
+        if self.semantic_attention is not None and self.semantic_attention.semantic_indices is not None:
+            # Get entity text embeddings for semantic neighbor lookup
+            # Use context_retriever's text embeddings (lower dimensional, from PNA aggregation)
+            all_entity_text_embs = self.context_retriever(all_kgl_index, graph, all_index, all_kgl_index)
+            
+            # h_id contains head entity indices - take the first positive sample's head
+            # h_id shape depends on training/eval: [batch, num_neg+1] or [batch, num_entities]
+            if h_id.dim() > 1:
+                head_entity_ids = h_id[:, 0]  # First column is positive head
+            else:
+                head_entity_ids = h_id
+            
+            # Enrich hidden states with semantic neighbors
+            hr_hidden_states = self.semantic_attention(
+                entity_ids=head_entity_ids,
+                hidden_states=hr_hidden_states,
+                all_entity_embeddings=all_entity_text_embs
+            )
 
         pred = self.score_retriever(h_id, r_id, t_id, hr_hidden_states, rel_token_embs, graph, all_index, all_kgl_index)
         return pred
