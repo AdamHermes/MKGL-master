@@ -1,0 +1,493 @@
+2025-12-31 07:43:27.572198: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-12-31 07:43:27.590976: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1767167007.612501    8478 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1767167007.619149    8478 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1767167007.635655    8478 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767167007.635681    8478 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767167007.635683    8478 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767167007.635686    8478 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2025-12-31 07:43:27.640561: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+Config file: config/fb15k237_ind.yaml
+!!python/object/new:easydict.EasyDict
+state:
+  output_dir: outputs/
+  model_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  kgl_token_length: 10
+  dataset: &id008 !!python/object/new:easydict.EasyDict
+    state:
+      class: FB15k237Inductive
+      path: data/datasets/
+      version: v1
+    dictitems:
+      class: FB15k237Inductive
+      path: data/datasets/
+      version: v1
+  tokenizer: &id009 !!python/object/new:easydict.EasyDict
+    state:
+      pretrained_model_name_or_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+      use_fast: false
+      add_eos_token: false
+    dictitems:
+      pretrained_model_name_or_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+      use_fast: false
+      add_eos_token: false
+  mkglconfig: &id010 !!python/object/new:easydict.EasyDict
+    state:
+      pretrained_model_name_or_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+    dictitems:
+      pretrained_model_name_or_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  mkgl: &id011 !!python/object/new:easydict.EasyDict
+    state:
+      pretrained_model_name_or_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+      load_in_8bit: false
+    dictitems:
+      pretrained_model_name_or_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+      load_in_8bit: false
+  loraconfig: &id012 !!python/object/new:easydict.EasyDict
+    state:
+      r: 32
+      lora_alpha: 8
+      lora_dropout: 0.05
+      target_modules: &id001
+      - q_proj
+      - v_proj
+    dictitems:
+      r: 32
+      lora_alpha: 8
+      lora_dropout: 0.05
+      target_modules: *id001
+  trainer: &id013 !!python/object/new:easydict.EasyDict
+    state:
+      output_dir: outputs/fb15k237_ind_v1
+      num_train_epochs: 2
+      save_total_limit: 1
+      per_device_train_batch_size: 16
+      per_device_eval_batch_size: 32
+      evaluation_strategy: epoch
+      save_strategy: 'no'
+      warmup_steps: 50
+      bf16: true
+      logging_steps: 5
+      logging_strategy: steps
+      learning_rate: 0.005
+      gradient_accumulation_steps: 4
+      eval_accumulation_steps: 64
+      save_safetensors: false
+      remove_unused_columns: false
+      label_names: &id002
+      - label
+      optim: adamw_8bit
+      max_grad_norm: 1.0
+      ddp_find_unused_parameters: true
+      report_to: &id003
+      - tensorboard
+    dictitems:
+      output_dir: outputs/fb15k237_ind_v1
+      num_train_epochs: 2
+      save_total_limit: 1
+      per_device_train_batch_size: 16
+      per_device_eval_batch_size: 32
+      evaluation_strategy: epoch
+      save_strategy: 'no'
+      warmup_steps: 50
+      bf16: true
+      logging_steps: 5
+      logging_strategy: steps
+      learning_rate: 0.005
+      gradient_accumulation_steps: 4
+      eval_accumulation_steps: 64
+      save_safetensors: false
+      remove_unused_columns: false
+      label_names: *id002
+      optim: adamw_8bit
+      max_grad_norm: 1.0
+      ddp_find_unused_parameters: true
+      report_to: *id003
+  mkgl4kgc: &id014 !!python/object/new:easydict.EasyDict
+    state:
+      criterion: bce
+      num_negative: 32
+      strict_negative: true
+      adversarial_temperature: 0.5
+    dictitems:
+      criterion: bce
+      num_negative: 32
+      strict_negative: true
+      adversarial_temperature: 0.5
+  context_retriever: &id015 !!python/object/new:easydict.EasyDict
+    state:
+      llm_hidden_dim: 2048
+      r: 32
+      text_encoder: pna
+      kg_encoder: &id005 !!python/object/new:easydict.EasyDict
+        state:
+          class: PNA
+          base_layer: &id004 !!python/object/new:easydict.EasyDict
+            state:
+              class: PNALayer
+              input_dim: 32
+              output_dim: 32
+              query_input_dim: 32
+              message_func: distmult
+              aggregate_func: sum
+              layer_norm: true
+              dependent: true
+            dictitems:
+              class: PNALayer
+              input_dim: 32
+              output_dim: 32
+              query_input_dim: 32
+              message_func: distmult
+              aggregate_func: sum
+              layer_norm: true
+              dependent: true
+          num_layer: 1
+          node_ratio: 0.1
+          test_node_ratio: 1
+        dictitems:
+          class: PNA
+          base_layer: *id004
+          num_layer: 1
+          node_ratio: 0.1
+          test_node_ratio: 1
+    dictitems:
+      llm_hidden_dim: 2048
+      r: 32
+      text_encoder: pna
+      kg_encoder: *id005
+  score_retriever: &id016 !!python/object/new:easydict.EasyDict
+    state:
+      llm_hidden_dim: 2048
+      r: 32
+      text_encoder: pna
+      kg_encoder: &id007 !!python/object/new:easydict.EasyDict
+        state:
+          class: ConditionedPNA
+          base_layer: &id006 !!python/object/new:easydict.EasyDict
+            state:
+              class: PNALayer
+              input_dim: 32
+              output_dim: 32
+              query_input_dim: 32
+              message_func: distmult
+              aggregate_func: pna
+              layer_norm: true
+              dependent: true
+            dictitems:
+              class: PNALayer
+              input_dim: 32
+              output_dim: 32
+              query_input_dim: 32
+              message_func: distmult
+              aggregate_func: pna
+              layer_norm: true
+              dependent: true
+          num_layer: 6
+          node_ratio: 1
+        dictitems:
+          class: ConditionedPNA
+          base_layer: *id006
+          num_layer: 6
+          node_ratio: 1
+    dictitems:
+      llm_hidden_dim: 2048
+      r: 32
+      text_encoder: pna
+      kg_encoder: *id007
+dictitems:
+  output_dir: outputs/
+  model_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  kgl_token_length: 10
+  dataset: *id008
+  tokenizer: *id009
+  mkglconfig: *id010
+  mkgl: *id011
+  loraconfig: *id012
+  trainer: *id013
+  mkgl4kgc: *id014
+  context_retriever: *id015
+  score_retriever: *id016
+
+##########Load dataset from data/preprocessed/fb15k237_ind_v1.pkl############
+config.json: 100% 608/608 [00:00<00:00, 5.62MB/s]
+You are using a model of type llama to instantiate a model of type mkgl_config. This is not supported for all configurations of models and can yield errors.
+model.safetensors: 100% 2.20G/2.20G [00:05<00:00, 372MB/s]
+generation_config.json: 100% 124/124 [00:00<00:00, 1.41MB/s]
+trainable params: 7,235,105 || all params: 1,107,283,489 || trainable%: 0.6534103571375478
+None
+PeftModel(
+  (base_model): LoraModel(
+    (model): MKGL(
+      (model): LlamaModel(
+        (embed_tokens): Embedding(32000, 2048)
+        (layers): ModuleList(
+          (0-21): 22 x LlamaDecoderLayer(
+            (self_attn): LlamaSdpaAttention(
+              (q_proj): lora.Linear(
+                (base_layer): Linear(in_features=2048, out_features=2048, bias=False)
+                (lora_dropout): ModuleDict(
+                  (default): Dropout(p=0.05, inplace=False)
+                )
+                (lora_A): ModuleDict(
+                  (default): Linear(in_features=2048, out_features=32, bias=False)
+                )
+                (lora_B): ModuleDict(
+                  (default): Linear(in_features=32, out_features=2048, bias=False)
+                )
+                (lora_embedding_A): ParameterDict()
+                (lora_embedding_B): ParameterDict()
+              )
+              (k_proj): Linear(in_features=2048, out_features=256, bias=False)
+              (v_proj): lora.Linear(
+                (base_layer): Linear(in_features=2048, out_features=256, bias=False)
+                (lora_dropout): ModuleDict(
+                  (default): Dropout(p=0.05, inplace=False)
+                )
+                (lora_A): ModuleDict(
+                  (default): Linear(in_features=2048, out_features=32, bias=False)
+                )
+                (lora_B): ModuleDict(
+                  (default): Linear(in_features=32, out_features=256, bias=False)
+                )
+                (lora_embedding_A): ParameterDict()
+                (lora_embedding_B): ParameterDict()
+              )
+              (o_proj): Linear(in_features=2048, out_features=2048, bias=False)
+              (rotary_emb): LlamaRotaryEmbedding()
+            )
+            (mlp): LlamaMLP(
+              (gate_proj): Linear(in_features=2048, out_features=5632, bias=False)
+              (up_proj): Linear(in_features=2048, out_features=5632, bias=False)
+              (down_proj): Linear(in_features=5632, out_features=2048, bias=False)
+              (act_fn): SiLU()
+            )
+            (input_layernorm): LlamaRMSNorm()
+            (post_attention_layernorm): LlamaRMSNorm()
+          )
+        )
+        (norm): LlamaRMSNorm()
+      )
+      (lm_head): Linear(in_features=2048, out_features=32000, bias=False)
+      (context_retriever): ContextRetriever(
+        (down_scaling): Linear(in_features=2048, out_features=32, bias=False)
+        (re_scaling): Linear(in_features=384, out_features=32, bias=True)
+        (up_scaling): Linear(in_features=32, out_features=2048, bias=False)
+      )
+      (score_retriever): ScoreRetriever(
+        (down_scaling): Linear(in_features=2048, out_features=32, bias=False)
+        (re_scaling): Linear(in_features=384, out_features=32, bias=True)
+        (kg_retriever): ConditionedPNA(
+          (layers): ModuleList(
+            (0-5): 6 x PNALayer()
+          )
+          (mlp): MLP(
+            (layers): ModuleList(
+              (0): Linear(in_features=32, out_features=64, bias=True)
+              (1): Linear(in_features=64, out_features=1, bias=True)
+            )
+          )
+          (rel_embedding): Embedding(360, 32)
+          (linear): Linear(in_features=64, out_features=32, bias=True)
+        )
+        (h_down_scaling): Linear(in_features=2048, out_features=32, bias=False)
+        (r_down_scaling): Linear(in_features=2048, out_features=32, bias=False)
+      )
+    )
+  )
+)
+TrainingArguments(
+_n_gpu=1,
+accelerator_config={'split_batches': False, 'dispatch_batches': None, 'even_batches': True, 'use_seedable_sampler': True, 'non_blocking': False, 'gradient_accumulation_kwargs': None},
+adafactor=False,
+adam_beta1=0.9,
+adam_beta2=0.999,
+adam_epsilon=1e-08,
+auto_find_batch_size=False,
+batch_eval_metrics=False,
+bf16=True,
+bf16_full_eval=False,
+data_seed=None,
+dataloader_drop_last=False,
+dataloader_num_workers=0,
+dataloader_persistent_workers=False,
+dataloader_pin_memory=True,
+dataloader_prefetch_factor=None,
+ddp_backend=None,
+ddp_broadcast_buffers=None,
+ddp_bucket_cap_mb=None,
+ddp_find_unused_parameters=True,
+ddp_timeout=1800,
+debug=[],
+deepspeed=None,
+disable_tqdm=False,
+dispatch_batches=None,
+do_eval=True,
+do_predict=False,
+do_train=False,
+eval_accumulation_steps=64,
+eval_delay=0,
+eval_do_concat_batches=True,
+eval_steps=None,
+eval_strategy=IntervalStrategy.EPOCH,
+evaluation_strategy=epoch,
+fp16=False,
+fp16_backend=auto,
+fp16_full_eval=False,
+fp16_opt_level=O1,
+fsdp=[],
+fsdp_config={'min_num_params': 0, 'xla': False, 'xla_fsdp_v2': False, 'xla_fsdp_grad_ckpt': False},
+fsdp_min_num_params=0,
+fsdp_transformer_layer_cls_to_wrap=None,
+full_determinism=False,
+gradient_accumulation_steps=4,
+gradient_checkpointing=False,
+gradient_checkpointing_kwargs=None,
+greater_is_better=None,
+group_by_length=False,
+half_precision_backend=auto,
+hub_always_push=False,
+hub_model_id=None,
+hub_private_repo=False,
+hub_strategy=HubStrategy.EVERY_SAVE,
+hub_token=<HUB_TOKEN>,
+ignore_data_skip=False,
+include_inputs_for_metrics=False,
+include_num_input_tokens_seen=False,
+include_tokens_per_second=False,
+jit_mode_eval=False,
+label_names=['label'],
+label_smoothing_factor=0.0,
+learning_rate=0.005,
+length_column_name=length,
+load_best_model_at_end=False,
+local_rank=0,
+log_level=passive,
+log_level_replica=warning,
+log_on_each_node=True,
+logging_dir=outputs/fb15k237_ind_v1/runs/Dec31_07-43-48_7a1e8787afdc,
+logging_first_step=False,
+logging_nan_inf_filter=True,
+logging_steps=5,
+logging_strategy=IntervalStrategy.STEPS,
+lr_scheduler_kwargs={},
+lr_scheduler_type=SchedulerType.LINEAR,
+max_grad_norm=1.0,
+max_steps=-1,
+metric_for_best_model=None,
+mp_parameters=,
+neftune_noise_alpha=None,
+no_cuda=False,
+num_train_epochs=2,
+optim=OptimizerNames.ADAMW_8BIT,
+optim_args=None,
+optim_target_modules=None,
+output_dir=outputs/fb15k237_ind_v1,
+overwrite_output_dir=False,
+past_index=-1,
+per_device_eval_batch_size=32,
+per_device_train_batch_size=16,
+prediction_loss_only=False,
+push_to_hub=False,
+push_to_hub_model_id=None,
+push_to_hub_organization=None,
+push_to_hub_token=<PUSH_TO_HUB_TOKEN>,
+ray_scope=last,
+remove_unused_columns=False,
+report_to=['tensorboard'],
+restore_callback_states_from_checkpoint=False,
+resume_from_checkpoint=None,
+run_name=outputs/fb15k237_ind_v1,
+save_on_each_node=False,
+save_only_model=False,
+save_safetensors=False,
+save_steps=500,
+save_strategy=IntervalStrategy.NO,
+save_total_limit=1,
+seed=42,
+skip_memory_metrics=True,
+split_batches=None,
+tf32=None,
+torch_compile=False,
+torch_compile_backend=None,
+torch_compile_mode=None,
+torchdynamo=None,
+tpu_metrics_debug=False,
+tpu_num_cores=None,
+use_cpu=False,
+use_ipex=False,
+use_legacy_prediction_loop=False,
+use_mps_device=False,
+warmup_ratio=0.0,
+warmup_steps=50,
+weight_decay=0.0,
+)
+/usr/local/lib/python3.12/dist-packages/torch/functional.py:534: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at ../aten/src/ATen/native/TensorShape.cpp:3595.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+100% 13/13 [00:07<00:00,  1.72it/s]{'mr': np.float64(497.02893081761005), 'mrr': np.float64(0.012703212106618886), 'hits@1': np.float64(0.0025157232704402514), 'hits@3': np.float64(0.006289308176100629), 'hits@10': np.float64(0.021383647798742137)}
+100% 13/13 [00:07<00:00,  1.78it/s]
+{'loss': 0.8068, 'grad_norm': 1.5903732776641846, 'learning_rate': 0.0005, 'epoch': 0.08}
+{'loss': 0.6986, 'grad_norm': 0.8819885849952698, 'learning_rate': 0.001, 'epoch': 0.15}
+{'loss': 0.6499, 'grad_norm': 0.7293267846107483, 'learning_rate': 0.0015, 'epoch': 0.23}
+{'loss': 0.6257, 'grad_norm': 0.9878475069999695, 'learning_rate': 0.002, 'epoch': 0.3}
+{'loss': 0.5876, 'grad_norm': 0.573784351348877, 'learning_rate': 0.0025, 'epoch': 0.38}
+{'loss': 0.5887, 'grad_norm': 0.510155975818634, 'learning_rate': 0.003, 'epoch': 0.45}
+{'loss': 0.5466, 'grad_norm': 0.8701381683349609, 'learning_rate': 0.0034999999999999996, 'epoch': 0.53}
+{'loss': 0.5272, 'grad_norm': 1.0592643022537231, 'learning_rate': 0.004, 'epoch': 0.6}
+{'loss': 0.5547, 'grad_norm': 3.1230146884918213, 'learning_rate': 0.0045000000000000005, 'epoch': 0.68}
+{'loss': 0.5171, 'grad_norm': 0.7012411952018738, 'learning_rate': 0.005, 'epoch': 0.75}
+{'loss': 0.5101, 'grad_norm': 0.7973556518554688, 'learning_rate': 0.004695121951219512, 'epoch': 0.83}
+{'loss': 0.5294, 'grad_norm': 0.700470507144928, 'learning_rate': 0.004390243902439025, 'epoch': 0.9}
+{'loss': 0.5278, 'grad_norm': 0.8608639240264893, 'learning_rate': 0.004085365853658537, 'epoch': 0.98}
+ 50% 66/132 [03:18<03:17,  2.99s/it]
+  0% 0/13 [00:00<?, ?it/s]
+ 15% 2/13 [00:00<00:03,  3.28it/s]
+ 23% 3/13 [00:01<00:04,  2.34it/s]
+ 31% 4/13 [00:01<00:04,  2.00it/s]
+ 38% 5/13 [00:02<00:04,  1.84it/s]
+ 46% 6/13 [00:03<00:04,  1.72it/s]
+ 54% 7/13 [00:03<00:03,  1.67it/s]
+ 62% 8/13 [00:04<00:03,  1.63it/s]
+ 69% 9/13 [00:05<00:02,  1.62it/s]
+ 77% 10/13 [00:05<00:01,  1.62it/s]
+ 85% 11/13 [00:06<00:01,  1.60it/s]
+ 92% 12/13 [00:06<00:00,  1.59it/s]
+100% 13/13 [00:07<00:00,  1.69it/s]{'mr': np.float64(114.51698113207547), 'mrr': np.float64(0.335683424139207), 'hits@1': np.float64(0.22641509433962265), 'hits@3': np.float64(0.389937106918239), 'hits@10': np.float64(0.5333333333333333)}
+                                    
+{'eval_loss': 1.2912017107009888, 'eval_mr': 114.51698113207547, 'eval_mrr': 0.335683424139207, 'eval_hits@1': 0.22641509433962265, 'eval_hits@3': 0.389937106918239, 'eval_hits@10': 0.5333333333333333, 'eval_runtime': 8.1257, 'eval_samples_per_second': 50.58, 'eval_steps_per_second': 1.6, 'epoch': 0.99}
+ 50% 66/132 [03:27<03:17,  2.99s/it]
+100% 13/13 [00:07<00:00,  1.69it/s]
+{'loss': 0.478, 'grad_norm': 0.44859257340431213, 'learning_rate': 0.003780487804878049, 'epoch': 1.05}
+{'loss': 0.4783, 'grad_norm': 0.6563161015510559, 'learning_rate': 0.0034756097560975606, 'epoch': 1.13}
+{'loss': 0.4633, 'grad_norm': 0.36762335896492004, 'learning_rate': 0.0031707317073170734, 'epoch': 1.2}
+{'loss': 0.4645, 'grad_norm': 0.9570528864860535, 'learning_rate': 0.0028658536585365853, 'epoch': 1.28}
+{'loss': 0.4681, 'grad_norm': 0.3464905917644501, 'learning_rate': 0.0025609756097560977, 'epoch': 1.35}
+{'loss': 0.4766, 'grad_norm': 0.6751734614372253, 'learning_rate': 0.00225609756097561, 'epoch': 1.43}
+{'loss': 0.4553, 'grad_norm': 0.6897686123847961, 'learning_rate': 0.0019512195121951222, 'epoch': 1.5}
+{'loss': 0.4545, 'grad_norm': 0.6835634112358093, 'learning_rate': 0.0016463414634146343, 'epoch': 1.58}
+{'loss': 0.4729, 'grad_norm': 0.6712160706520081, 'learning_rate': 0.0013414634146341464, 'epoch': 1.65}
+{'loss': 0.4712, 'grad_norm': 0.3708733320236206, 'learning_rate': 0.0010365853658536586, 'epoch': 1.73}
+{'loss': 0.4475, 'grad_norm': 0.5246190428733826, 'learning_rate': 0.0007317073170731707, 'epoch': 1.8}
+{'loss': 0.4592, 'grad_norm': 0.8040733337402344, 'learning_rate': 0.000426829268292683, 'epoch': 1.88}
+{'loss': 0.4559, 'grad_norm': 0.43791502714157104, 'learning_rate': 0.00012195121951219514, 'epoch': 1.95}
+100% 132/132 [06:45<00:00,  3.03s/it]
+  0% 0/13 [00:00<?, ?it/s]
+ 15% 2/13 [00:00<00:03,  3.30it/s]
+ 23% 3/13 [00:01<00:04,  2.32it/s]
+ 31% 4/13 [00:01<00:04,  1.99it/s]
+ 38% 5/13 [00:02<00:04,  1.83it/s]
+ 46% 6/13 [00:03<00:04,  1.71it/s]
+ 54% 7/13 [00:03<00:03,  1.66it/s]
+ 62% 8/13 [00:04<00:03,  1.62it/s]
+ 69% 9/13 [00:05<00:02,  1.61it/s]
+ 77% 10/13 [00:05<00:01,  1.61it/s]
+ 85% 11/13 [00:06<00:01,  1.60it/s]
+ 92% 12/13 [00:06<00:00,  1.59it/s]
+100% 13/13 [00:07<00:00,  1.69it/s]{'mr': np.float64(106.75974842767296), 'mrr': np.float64(0.359022699713005), 'hits@1': np.float64(0.2440251572327044), 'hits@3': np.float64(0.43018867924528303), 'hits@10': np.float64(0.5622641509433962)}
+                                     
+{'eval_loss': 2.105942964553833, 'eval_mr': 106.75974842767296, 'eval_mrr': 0.359022699713005, 'eval_hits@1': 0.2440251572327044, 'eval_hits@3': 0.43018867924528303, 'eval_hits@10': 0.5622641509433962, 'eval_runtime': 8.1524, 'eval_samples_per_second': 50.415, 'eval_steps_per_second': 1.595, 'epoch': 1.98}
+100% 132/132 [06:53<00:00,  3.03s/it]
+100% 13/13 [00:07<00:00,  1.69it/s]
+{'train_runtime': 413.2225, 'train_samples_per_second': 20.546, 'train_steps_per_second': 0.319, 'train_loss': 0.5266172845255245, 'epoch': 1.98}
+100% 132/132 [06:53<00:00,  3.13s/it]
