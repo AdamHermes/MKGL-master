@@ -6,7 +6,7 @@ from torch_geometric.nn import MessagePassing
 from typing import Sequence
 
 
-class MultiLayerPerceptron(nn.Module):
+class MLP(nn.Module):
     """
     Multi-layer Perceptron.
     Note there is no batch normalization, activation or dropout in the last layer.
@@ -21,7 +21,7 @@ class MultiLayerPerceptron(nn.Module):
     """
 
     def __init__(self, input_dim, hidden_dims, short_cut=False, batch_norm=False, activation="relu", dropout=0):
-        super(MultiLayerPerceptron, self).__init__()
+        super(MLP, self).__init__()
 
         if not isinstance(hidden_dims, Sequence):
             hidden_dims = [hidden_dims]
