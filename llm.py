@@ -26,7 +26,7 @@ class MKGL(LlamaForCausalLM):
         super().__init__(config)
         self.semantic_attention = None  # Initialized in init_kg_specs
 
-    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg, semantic_neighbors_path=None): 
+    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg, semantic_neighbors_path=None, inductive_neighbors_path=None): 
         self.kgl2token = kgl2token
         self.orig_vocab_size = orig_vocab_size
         
@@ -42,9 +42,9 @@ class MKGL(LlamaForCausalLM):
         ).to(device)
         
         # Initialize Semantic Attention Module
-        self._init_semantic_attention(cfg, device, semantic_neighbors_path)
+        self._init_semantic_attention(cfg, device, semantic_neighbors_path, inductive_neighbors_path)
     
-    def _init_semantic_attention(self, cfg, device, semantic_neighbors_path=None):
+    def _init_semantic_attention(self, cfg, device, semantic_neighbors_path=None, inductive_neighbors_path=None):
         """Initialize the Dynamic Semantic Attention module."""
         semantic_cfg = cfg.get('semantic_attention', {})
         
@@ -63,12 +63,22 @@ class MKGL(LlamaForCausalLM):
         
         # Load semantic neighbors
         neighbors_file = semantic_cfg.get('neighbors_file', None) or semantic_neighbors_path
+        inductive_file = semantic_cfg.get('inductive_neighbors_file', None) or inductive_neighbors_path
+        
         if neighbors_file and os.path.exists(neighbors_file):
-            self.semantic_attention.load_semantic_neighbors(neighbors_file)
+            self.semantic_attention.load_semantic_neighbors(neighbors_file, inductive_file)
             print(f"[MKGL] Loaded semantic neighbors from {neighbors_file}")
+            if inductive_file and os.path.exists(inductive_file):
+                print(f"[MKGL] Loaded inductive semantic neighbors from {inductive_file}")
         else:
             print(f"[MKGL] Warning: Semantic neighbors file not found: {neighbors_file}")
             print("[MKGL] Semantic attention will be disabled until neighbors are loaded")
+    
+    def set_semantic_mode(self, mode):
+        """Switch semantic attention between transductive/inductive mode."""
+        if self.semantic_attention is not None:
+            self.semantic_attention.set_mode(mode)
+            
     def _init_kg_score(self, num_kg_tokens, ent_inter_emb_dim=64):
         device = self.lm_head.weight.device
 
@@ -264,7 +274,9 @@ class KGL4KGC(nn.Module):
         device = pos_h_index.device
         batch_size = len(batch.h_id)
         graph = self.get_graph(batch).to(device)
-     
+        
+        # Note: Semantic attention mode is set by subclass (KGL4IndKGC) if needed
+        # Default mode is 'transductive' which is correct for standard KGC
 
         all_index = torch.arange(graph.num_nodes, device=device)
         all_kgl_index = self.id2tokenid(all_index, split=batch.split)
@@ -489,6 +501,31 @@ class KGL4IndKGC(KGL4KGC):
         self.fact_graph = dataset.fact_graph
         self.inductive_graph = dataset.inductive_graph
         self.inductive_fact_graph = dataset.inductive_fact_graph
+
+    def predict(self, batch, all_loss=None, metric=None):
+        # Switch semantic attention mode based on split
+        # For inductive KGC: test uses inductive entities, train/valid use transductive
+        mode = 'inductive' if batch.split == 'test' else 'transductive'
+        
+        # Access the MKGL model's set_semantic_mode method
+        # self.llmodel is the PEFT-wrapped model
+        # Try direct attribute access first, then navigate wrapper
+        mode_set = False
+        if hasattr(self.llmodel, 'set_semantic_mode'):
+            self.llmodel.set_semantic_mode(mode)
+            mode_set = True
+        elif hasattr(self.llmodel, 'base_model') and hasattr(self.llmodel.base_model, 'model'):
+            # PeftModel structure: llmodel.base_model.model is the actual MKGL
+            base = self.llmodel.base_model.model
+            if hasattr(base, 'set_semantic_mode'):
+                base.set_semantic_mode(mode)
+                mode_set = True
+        
+        if not mode_set:
+            print(f"[KGL4IndKGC] WARNING: Could not set semantic mode to {mode}")
+        
+        # Call parent predict
+        return super().predict(batch, all_loss, metric)
 
     def id2tokenid(self, id, split='test', entity=True):
         if entity:

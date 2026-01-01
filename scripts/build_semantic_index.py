@@ -15,7 +15,32 @@ Usage:
 import argparse
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Add parent directory to path to import preprocess_new
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, parent_dir)
+
+# Import dataset classes at module level (BEFORE pickle.load)
+# These need to be added to __main__ namespace because pickle saved them with __main__ module
+try:
+    from preprocess_new import InductiveKGCDataset, KGCDataset, Prompter
+    from dataset_new import InductiveKnowledgeGraphDataset, StandardKGCDataset, FB15k237Inductive, WN18RRInductive, FB15k237, WN18RR
+    
+    # Add to __main__ namespace so pickle can find them
+    import __main__
+    __main__.InductiveKGCDataset = InductiveKGCDataset
+    __main__.KGCDataset = KGCDataset
+    __main__.Prompter = Prompter
+    __main__.InductiveKnowledgeGraphDataset = InductiveKnowledgeGraphDataset
+    __main__.StandardKGCDataset = StandardKGCDataset
+    __main__.FB15k237Inductive = FB15k237Inductive
+    __main__.WN18RRInductive = WN18RRInductive
+    __main__.FB15k237 = FB15k237
+    __main__.WN18RR = WN18RR
+except ImportError as e:
+    print(f"Error importing dataset classes: {e}")
+    print(f"Make sure preprocess_new.py and dataset_new.py are in: {parent_dir}")
+    sys.exit(1)
 
 import numpy as np
 import torch
@@ -184,6 +209,8 @@ def main():
     parser = argparse.ArgumentParser(description='Build semantic neighbor index')
     parser.add_argument('--config', '-c', type=str, default='config/fb15k237.yaml',
                         help='Config file path')
+    parser.add_argument('--version', '-v', type=str, default='',
+                        help='Dataset version (e.g., v1 for inductive datasets)')
     parser.add_argument('--top_k', type=int, default=100,
                         help='Number of top neighbors to retrieve before filtering')
     parser.add_argument('--max_neighbors', type=int, default=100,
@@ -194,17 +221,27 @@ def main():
                         help='Output file path (default: data/semantic_neighbors_{config_name}.pt)')
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size for embedding extraction')
+    parser.add_argument('--inductive', action='store_true',
+                        help='Build index for inductive test entities (instead of transductive)')
     args = parser.parse_args()
     
     # Load config
     with open(args.config, 'r') as f:
         cfg = easydict.EasyDict(yaml.safe_load(f))
     
+    # Handle version from command line or config
+    if args.version:
+        cfg.dataset.version = args.version
+    
     config_name = args.config.split('/')[-1].split('.')[0]
     if hasattr(cfg.dataset, 'version') and cfg.dataset.version:
         config_name += '_' + cfg.dataset.version
     
-    print(f"Building semantic index for: {config_name}")
+    # Add suffix for inductive index
+    index_suffix = '_ind' if args.inductive else ''
+    
+    print(f"Building semantic index for: {config_name}{index_suffix}")
+    print(f"Mode: {'INDUCTIVE (test entities)' if args.inductive else 'TRANSDUCTIVE (train/valid entities)'}")
     print(f"Parameters: top_k={args.top_k}, threshold={args.threshold}, max_neighbors={args.max_neighbors}")
     
     # Load preprocessed dataset
@@ -213,7 +250,8 @@ def main():
     
     if not os.path.exists(file_path):
         print(f"Error: Preprocessed dataset not found at {file_path}")
-        print("Please run preprocessing first.")
+        print("Please run preprocessing first:")
+        print(f"  python preprocess_new.py --config {args.config}" + (f" --version {args.version}" if args.version else ""))
         sys.exit(1)
     
     print(f"Loading dataset from {file_path}...")
@@ -222,8 +260,23 @@ def main():
     
     # Get entity token IDs (kgl2token format)
     vocab_df = dataset.vocab_df
-    entity_mask = vocab_df['entity'] == 1
-    entity_df = vocab_df[entity_mask]
+    
+    # For inductive mode, filter to only inductive entities
+    # For transductive mode, filter to only transductive entities
+    if args.inductive:
+        # Inductive entities have transductive=0 and entity=1
+        entity_mask = (vocab_df['entity'] == 1) & (vocab_df['transductive'] == 0)
+        print("Using INDUCTIVE entities (for test split)")
+    else:
+        # Transductive entities have transductive=1 and entity=1
+        entity_mask = (vocab_df['entity'] == 1) & (vocab_df['transductive'] == 1)
+        print("Using TRANSDUCTIVE entities (for train/valid split)")
+    
+    entity_df = vocab_df[entity_mask].copy()
+    
+    # Reset index to get contiguous entity IDs (0 to num_entities-1)
+    entity_df = entity_df.reset_index(drop=False)  # Keep original token_index as column
+    entity_df['local_id'] = range(len(entity_df))  # New local IDs
     
     num_entities = len(entity_df)
     print(f"Number of entities: {num_entities}")
@@ -270,7 +323,19 @@ def main():
     
     # Build structural neighbor sets
     print("Building structural neighbor sets...")
-    graph = dataset.kgdata.fact_graph
+    # Use appropriate graph based on mode
+    if args.inductive:
+        # For inductive, use inductive_fact_graph if available
+        if hasattr(dataset.kgdata, 'inductive_fact_graph'):
+            graph = dataset.kgdata.inductive_fact_graph
+            print("Using inductive_fact_graph for structural neighbors")
+        else:
+            graph = dataset.kgdata.fact_graph
+            print("Warning: inductive_fact_graph not found, using fact_graph")
+    else:
+        graph = dataset.kgdata.fact_graph
+        print("Using fact_graph for structural neighbors")
+    
     structural_neighbors = get_structural_neighbors(graph, num_entities)
     
     # Build FAISS index
@@ -353,7 +418,7 @@ def main():
         output_path = args.output
     else:
         os.makedirs('data', exist_ok=True)
-        output_path = f'data/semantic_neighbors_{config_name}.pt'
+        output_path = f'data/semantic_neighbors_{config_name}{index_suffix}.pt'
     
     print(f"\nSaving to {output_path}...")
     torch.save(semantic_adj, output_path)

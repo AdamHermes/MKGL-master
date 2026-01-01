@@ -105,16 +105,27 @@ if __name__ == "__main__":
     lora_config = LoraConfig(**cfg.loraconfig)
     model = get_peft_model(model, lora_config)
 
-    # Determine semantic neighbors file path
+    # Determine semantic neighbors file paths
     semantic_neighbors_path = None
+    inductive_neighbors_path = None
+    is_inductive = 'ind' in args.config
+    
     semantic_cfg = cfg.get('semantic_attention', {})
     if semantic_cfg.get('use', False):
         # Try config-specified path first, then auto-detect
         if semantic_cfg.get('neighbors_file'):
             semantic_neighbors_path = semantic_cfg.neighbors_file
         else:
-            # Auto-detect based on config name
+            # Auto-detect based on config name (transductive index)
             semantic_neighbors_path = f'data/semantic_neighbors_{args.config_name}.pt'
+        
+        # For inductive configs, also look for inductive neighbors file
+        if is_inductive:
+            if semantic_cfg.get('inductive_neighbors_file'):
+                inductive_neighbors_path = semantic_cfg.inductive_neighbors_file
+            else:
+                # Auto-detect inductive index: e.g., semantic_neighbors_fb15k237_ind_v1_ind.pt
+                inductive_neighbors_path = f'data/semantic_neighbors_{args.config_name}_ind.pt'
         
         if rank == 0:
             if os.path.exists(semantic_neighbors_path):
@@ -122,9 +133,18 @@ if __name__ == "__main__":
             else:
                 print(f"[Main] Warning: Semantic neighbors file not found: {semantic_neighbors_path}")
                 print(f"[Main] Run: python scripts/build_semantic_index.py --config {args.config}")
+            
+            if is_inductive:
+                if inductive_neighbors_path and os.path.exists(inductive_neighbors_path):
+                    print(f"[Main] Found inductive semantic neighbors file: {inductive_neighbors_path}")
+                else:
+                    print(f"[Main] Warning: Inductive neighbors file not found: {inductive_neighbors_path}")
+                    print(f"[Main] Run: python scripts/build_semantic_index.py --config {args.config} --inductive")
 
     kgl2token = torch.tensor(np.stack(dataset.vocab_df.text_token_ids)[:, :cfg.kgl_token_length])     
-    model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg, semantic_neighbors_path=semantic_neighbors_path) 
+    model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg, 
+                        semantic_neighbors_path=semantic_neighbors_path,
+                        inductive_neighbors_path=inductive_neighbors_path) 
     
     if rank == 0:
         print(model.print_trainable_parameters())

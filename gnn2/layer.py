@@ -245,3 +245,6 @@ class PNALayer(MessagePassing):
             output = self.activation(output)
 
         return output
+
+# Alias for backward compatibility
+MLP = MultiLayerPerceptron

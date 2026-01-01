@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import math
+import os
 #from torchdrug import core
 from gnn2.model import *
 from gnn2.layer import PNALayer
@@ -52,17 +53,23 @@ class SemanticAttentionModule(nn.Module):
             self.value_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         
         # Semantic adjacency (loaded externally)
+        # Support dual indices for inductive setting (transductive + inductive)
         self.register_buffer('semantic_indices', None)  # [num_entities, max_k]
         self.register_buffer('semantic_scores', None)   # [num_entities, max_k]
+        self.register_buffer('inductive_indices', None)  # [num_ind_entities, max_k] for test split
+        self.register_buffer('inductive_scores', None)   # [num_ind_entities, max_k]
         self.num_entities = 0
+        self.num_inductive_entities = 0
         self.max_k = 0
+        self.current_mode = 'transductive'  # 'transductive' or 'inductive'
     
-    def load_semantic_neighbors(self, semantic_adj_path):
+    def load_semantic_neighbors(self, semantic_adj_path, inductive_path=None):
         """
         Load precomputed semantic neighbors from file.
         
         Args:
-            semantic_adj_path: Path to .pt file with semantic adjacency
+            semantic_adj_path: Path to .pt file with transductive semantic adjacency
+            inductive_path: (Optional) Path to .pt file with inductive semantic adjacency
         """
         data = torch.load(semantic_adj_path, map_location='cpu')
         
@@ -71,9 +78,26 @@ class SemanticAttentionModule(nn.Module):
         self.num_entities = data['num_entities']
         self.max_k = self.semantic_indices.shape[1]
         
-        print(f"[SemanticAttention] Loaded {self.num_entities} entities, max_k={self.max_k}")
+        print(f"[SemanticAttention] Loaded {self.num_entities} transductive entities, max_k={self.max_k}")
+        
+        # Load inductive index if provided
+        if inductive_path and os.path.exists(inductive_path):
+            ind_data = torch.load(inductive_path, map_location='cpu')
+            self.inductive_indices = ind_data['dense_indices']
+            self.inductive_scores = ind_data['dense_scores']
+            self.num_inductive_entities = ind_data['num_entities']
+            print(f"[SemanticAttention] Loaded {self.num_inductive_entities} inductive entities")
+        elif inductive_path:
+            print(f"[SemanticAttention] Warning: Inductive path not found: {inductive_path}")
     
-    def set_semantic_neighbors(self, indices, scores, num_entities):
+    def set_mode(self, mode):
+        """Switch between transductive and inductive mode."""
+        if mode not in ('transductive', 'inductive'):
+            raise ValueError(f"Invalid mode: {mode}. Must be 'transductive' or 'inductive'")
+        self.current_mode = mode
+        # print(f"[SemanticAttention] Switched to {mode} mode")
+    
+    def set_semantic_neighbors(self, indices, scores, num_entities, mode='transductive'):
         """
         Set semantic neighbors directly (for dynamic loading).
         
@@ -81,11 +105,23 @@ class SemanticAttentionModule(nn.Module):
             indices: [num_entities, max_k] - neighbor indices (-1 for padding)
             scores: [num_entities, max_k] - similarity scores
             num_entities: Number of entities
+            mode: 'transductive' or 'inductive'
         """
-        self.semantic_indices = indices
-        self.semantic_scores = scores
-        self.num_entities = num_entities
+        if mode == 'inductive':
+            self.inductive_indices = indices
+            self.inductive_scores = scores
+            self.num_inductive_entities = num_entities
+        else:
+            self.semantic_indices = indices
+            self.semantic_scores = scores
+            self.num_entities = num_entities
         self.max_k = indices.shape[1]
+    
+    def _get_current_indices_and_scores(self):
+        """Get the indices and scores for the current mode."""
+        if self.current_mode == 'inductive' and self.inductive_indices is not None:
+            return self.inductive_indices, self.inductive_scores, self.num_inductive_entities
+        return self.semantic_indices, self.semantic_scores, self.num_entities
     
     def get_semantic_neighbors(self, entity_ids, k=None):
         """
@@ -100,7 +136,9 @@ class SemanticAttentionModule(nn.Module):
             neighbor_scores: Same shape, similarity scores
             valid_mask: Same shape, True for valid neighbors
         """
-        if self.semantic_indices is None:
+        indices, scores, num_ents = self._get_current_indices_and_scores()
+        
+        if indices is None:
             raise RuntimeError("Semantic neighbors not loaded. Call load_semantic_neighbors() first.")
         
         k = k or self.k
@@ -110,18 +148,32 @@ class SemanticAttentionModule(nn.Module):
         original_shape = entity_ids.shape
         entity_ids_flat = entity_ids.view(-1)
         
-        # Clamp to valid range
-        entity_ids_clamped = entity_ids_flat.clamp(0, self.num_entities - 1)
+        # Track which entity IDs are in bounds of the semantic index
+        in_bounds = (entity_ids_flat >= 0) & (entity_ids_flat < num_ents)
+        
+        # Debug: log mismatches
+        batch_size = entity_ids_flat.shape[0]
+        in_bounds_count = in_bounds.sum().item()
+        if in_bounds_count < batch_size:
+            print(f"[SemanticAttention] batch_size={batch_size}, in_bounds={in_bounds_count}/{batch_size}, "
+                  f"num_entities_in_index={num_ents}, mode={self.current_mode}")
+        
+        # Clamp to valid range for indexing
+        entity_ids_clamped = entity_ids_flat.clamp(0, num_ents - 1) if num_ents > 0 else entity_ids_flat.clamp(0, 0)
         
         # Lookup neighbors
-        indices = self.semantic_indices.to(device)
-        scores = self.semantic_scores.to(device)
+        indices = indices.to(device)
+        scores = scores.to(device)
         
         neighbor_ids = indices[entity_ids_clamped, :k]  # [flat_batch, k]
         neighbor_scores = scores[entity_ids_clamped, :k]
         
-        # Valid mask: neighbor_id != -1
-        valid_mask = neighbor_ids >= 0
+        # Valid mask: neighbor_id != -1 AND original entity_id was in bounds
+        valid_mask = (neighbor_ids >= 0) & in_bounds.unsqueeze(-1)
+        
+        # For out-of-bounds entities, set neighbor_ids to -1 to be safe
+        neighbor_ids = torch.where(in_bounds.unsqueeze(-1), neighbor_ids, 
+                                   torch.full_like(neighbor_ids, -1))
         
         # Reshape back
         if len(original_shape) > 1:
@@ -146,7 +198,9 @@ class SemanticAttentionModule(nn.Module):
             enriched_hidden: [batch_size, hidden_dim] - semantically enriched states
             attention_weights: (optional) [batch_size, k] - attention weights
         """
-        if self.semantic_indices is None or self.k == 0:
+        indices, scores, num_ents = self._get_current_indices_and_scores()
+        
+        if indices is None or self.k == 0:
             # No semantic neighbors: return original
             if return_attention:
                 return hidden_states, None
@@ -154,6 +208,26 @@ class SemanticAttentionModule(nn.Module):
         
         batch_size = entity_ids.shape[0]
         device = hidden_states.device
+        dtype = hidden_states.dtype  # Match dtype of hidden_states (could be bf16/fp16)
+        num_all_entities = all_entity_embeddings.shape[0]
+        
+        # Check how many entity_ids are within bounds of semantic neighbor index
+        in_bounds = (entity_ids >= 0) & (entity_ids < num_ents)
+        num_in_bounds = in_bounds.sum().item()
+        
+        # Log on first few calls for debugging
+        if not hasattr(self, '_debug_count'):
+            self._debug_count = 0
+        if self._debug_count < 5:
+            print(f"[SemanticAttention] batch_size={batch_size}, in_bounds={num_in_bounds}/{batch_size}, "
+                  f"num_entities_in_index={num_ents}, num_all_entities={num_all_entities}, mode={self.current_mode}")
+            self._debug_count += 1
+        
+        # Skip if NO entity IDs are in range (instead of skipping if ANY are out of range)
+        if num_in_bounds == 0:
+            if return_attention:
+                return hidden_states, None
+            return hidden_states
         
         # Get semantic neighbors
         neighbor_ids, precomputed_scores, valid_mask = self.get_semantic_neighbors(entity_ids)
@@ -161,11 +235,20 @@ class SemanticAttentionModule(nn.Module):
         # precomputed_scores: [batch_size, k]
         # valid_mask: [batch_size, k]
         
-        # Replace invalid (-1) with 0 for embedding lookup (will be masked)
-        neighbor_ids_safe = neighbor_ids.clamp(min=0)
+        # Move to same device and dtype
+        precomputed_scores = precomputed_scores.to(device=device, dtype=dtype)
+        valid_mask = valid_mask.to(device=device)
         
-        # Get neighbor embeddings
-        neighbor_embeddings = all_entity_embeddings[neighbor_ids_safe]  # [batch, k, embed_dim]
+        # Replace invalid (-1) with 0 for embedding lookup (will be masked)
+        # Also clamp to valid range for all_entity_embeddings
+        neighbor_ids_safe = neighbor_ids.clamp(min=0, max=num_all_entities - 1)
+        
+        # Additionally mask out any neighbors that were out of bounds
+        out_of_bounds_mask = (neighbor_ids < 0) | (neighbor_ids >= num_all_entities)
+        valid_mask = valid_mask & ~out_of_bounds_mask.to(device)
+        
+        # Get neighbor embeddings and convert to same dtype as hidden_states
+        neighbor_embeddings = all_entity_embeddings[neighbor_ids_safe].to(dtype=dtype)  # [batch, k, embed_dim]
         
         # Compute attention scores
         if self.use_projection:
@@ -198,8 +281,8 @@ class SemanticAttentionModule(nn.Module):
         # Mask invalid neighbors
         combined_scores = combined_scores.masked_fill(~valid_mask, float('-inf'))
         
-        # Softmax attention
-        attention_weights = F.softmax(combined_scores, dim=-1)  # [batch, k]
+        # Softmax attention (use float32 for numerical stability)
+        attention_weights = F.softmax(combined_scores.float(), dim=-1).to(dtype)  # [batch, k]
         
         # Handle all-invalid case (set to zero)
         all_invalid = ~valid_mask.any(dim=-1, keepdim=True)  # [batch, 1]
