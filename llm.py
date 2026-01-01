@@ -262,8 +262,6 @@ class KGL4KGC(nn.Module):
     def target(self, batch):
         pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
         batch_size = len(pos_h_index)
-        
-        # [CRITICAL] This graph must contain Train + Valid + Test edges
         graph = self.get_eval_graph(batch) 
 
         device = pos_h_index.device
@@ -272,55 +270,42 @@ class KGL4KGC(nn.Module):
         h_all = graph.edge_index[0].to(device)
         t_all = graph.edge_index[1].to(device)
         r_all = graph.edge_attr.to(device) 
-        
-        batch_range = torch.arange(batch_size, device=device)
 
         # -------------------------------------------------
-        # 1. TAIL MASK
+        # 1. TAIL MASK (You already fixed this part)
         # -------------------------------------------------
         mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
                  (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        
         matched_edges_t = mask_t.nonzero(as_tuple=False)
+        
         edge_idx_t = matched_edges_t[:, 0]
-        batch_idx_t = matched_edges_t[:, 1] # Correct Indexing
+        batch_idx_t = matched_edges_t[:, 1]  # <--- CORRECT: Using real batch index
+        
         t_truth_index = t_all[edge_idx_t]
         
-        # LOGIC: 1 = KEEP, 0 = MASK
-        
-        # 1. Init with 1 (Keep Everyone)
         t_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
-        
-        # 2. Set Matches to 0 (Mask Siblings + Target)
         t_mask[batch_idx_t, t_truth_index] = 0
 
-        # 3. [Safety] Explicitly Set Target to 1 (Keep Target)
-        # This handles the case where the Target was accidentally masked in Step 2
-        t_mask[batch_range, pos_t_index] = 1
-
         # -------------------------------------------------
-        # 2. HEAD MASK
+        # 2. HEAD MASK (You MUST fix this part too!)
         # -------------------------------------------------
         mask_h = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
                  (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        
         matched_edges_h = mask_h.nonzero(as_tuple=False)
+        
         edge_idx_h = matched_edges_h[:, 0]
-        batch_idx_h = matched_edges_h[:, 1] # Correct Indexing
+        batch_idx_h = matched_edges_h[:, 1]  # <--- FIX: Use real batch index here too!
+        
         h_truth_index = h_all[edge_idx_h]
         
-        # 1. Init with 1 (Keep Everyone)
+        # DELETE THIS BUGGY LINE:
+        # pos_index = torch.repeat_interleave(num_h_truth)
+        
         h_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
         
-        # 2. Set Matches to 0 (Mask Siblings + Target)
+        # USE THE FIX:
         h_mask[batch_idx_h, h_truth_index] = 0
 
-        # 3. [Safety] Explicitly Set Target to 1 (Keep Target)
-        h_mask[batch_range, pos_h_index] = 1
-
-        # -------------------------------------------------
-        # Return
-        # -------------------------------------------------
         mask = torch.cat([t_mask, h_mask], dim=0)
         target = torch.cat([pos_t_index, pos_h_index], dim=0)
 
