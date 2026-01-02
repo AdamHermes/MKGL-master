@@ -1,13 +1,13 @@
-2025-12-31 07:43:27.572198: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
-2025-12-31 07:43:27.590976: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2026-01-01 07:56:57.716730: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-01-01 07:56:57.733956: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
 WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-E0000 00:00:1767167007.612501    8478 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
-E0000 00:00:1767167007.619149    8478 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
-W0000 00:00:1767167007.635655    8478 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1767167007.635681    8478 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1767167007.635683    8478 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1767167007.635686    8478 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-2025-12-31 07:43:27.640561: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+E0000 00:00:1767254217.755412   10274 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1767254217.762001   10274 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1767254217.778208   10274 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767254217.778235   10274 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767254217.778238   10274 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767254217.778241   10274 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2026-01-01 07:56:57.782975: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
 To enable the following instructions: AVX2 AVX512F AVX512_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
 Config file: config/fb15k237_ind.yaml
 !!python/object/new:easydict.EasyDict
@@ -211,10 +211,7 @@ dictitems:
   score_retriever: *id016
 
 ##########Load dataset from data/preprocessed/fb15k237_ind_v1.pkl############
-config.json: 100% 608/608 [00:00<00:00, 5.62MB/s]
 You are using a model of type llama to instantiate a model of type mkgl_config. This is not supported for all configurations of models and can yield errors.
-model.safetensors: 100% 2.20G/2.20G [00:05<00:00, 372MB/s]
-generation_config.json: 100% 124/124 [00:00<00:00, 1.41MB/s]
 trainable params: 7,235,105 || all params: 1,107,283,489 || trainable%: 0.6534103571375478
 None
 PeftModel(
@@ -366,7 +363,7 @@ local_rank=0,
 log_level=passive,
 log_level_replica=warning,
 log_on_each_node=True,
-logging_dir=outputs/fb15k237_ind_v1/runs/Dec31_07-43-48_7a1e8787afdc,
+logging_dir=outputs/fb15k237_ind_v1/runs/Jan01_07-57-11_ca7bbab1ff90,
 logging_first_step=False,
 logging_nan_inf_filter=True,
 logging_steps=5,
@@ -425,69 +422,69 @@ weight_decay=0.0,
 )
 /usr/local/lib/python3.12/dist-packages/torch/functional.py:534: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at ../aten/src/ATen/native/TensorShape.cpp:3595.)
   return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
-100% 13/13 [00:07<00:00,  1.72it/s]{'mr': np.float64(497.02893081761005), 'mrr': np.float64(0.012703212106618886), 'hits@1': np.float64(0.0025157232704402514), 'hits@3': np.float64(0.006289308176100629), 'hits@10': np.float64(0.021383647798742137)}
-100% 13/13 [00:07<00:00,  1.78it/s]
-{'loss': 0.8068, 'grad_norm': 1.5903732776641846, 'learning_rate': 0.0005, 'epoch': 0.08}
-{'loss': 0.6986, 'grad_norm': 0.8819885849952698, 'learning_rate': 0.001, 'epoch': 0.15}
-{'loss': 0.6499, 'grad_norm': 0.7293267846107483, 'learning_rate': 0.0015, 'epoch': 0.23}
-{'loss': 0.6257, 'grad_norm': 0.9878475069999695, 'learning_rate': 0.002, 'epoch': 0.3}
-{'loss': 0.5876, 'grad_norm': 0.573784351348877, 'learning_rate': 0.0025, 'epoch': 0.38}
-{'loss': 0.5887, 'grad_norm': 0.510155975818634, 'learning_rate': 0.003, 'epoch': 0.45}
-{'loss': 0.5466, 'grad_norm': 0.8701381683349609, 'learning_rate': 0.0034999999999999996, 'epoch': 0.53}
-{'loss': 0.5272, 'grad_norm': 1.0592643022537231, 'learning_rate': 0.004, 'epoch': 0.6}
-{'loss': 0.5547, 'grad_norm': 3.1230146884918213, 'learning_rate': 0.0045000000000000005, 'epoch': 0.68}
-{'loss': 0.5171, 'grad_norm': 0.7012411952018738, 'learning_rate': 0.005, 'epoch': 0.75}
-{'loss': 0.5101, 'grad_norm': 0.7973556518554688, 'learning_rate': 0.004695121951219512, 'epoch': 0.83}
-{'loss': 0.5294, 'grad_norm': 0.700470507144928, 'learning_rate': 0.004390243902439025, 'epoch': 0.9}
-{'loss': 0.5278, 'grad_norm': 0.8608639240264893, 'learning_rate': 0.004085365853658537, 'epoch': 0.98}
- 50% 66/132 [03:18<03:17,  2.99s/it]
+100% 13/13 [00:07<00:00,  1.67it/s]{'mr': np.float64(497.0276729559748), 'mrr': np.float64(0.012700951076227911), 'hits@1': np.float64(0.0025157232704402514), 'hits@3': np.float64(0.006289308176100629), 'hits@10': np.float64(0.021383647798742137)}
+100% 13/13 [00:07<00:00,  1.73it/s]
+{'loss': 0.807, 'grad_norm': 1.6233100891113281, 'learning_rate': 0.0005, 'epoch': 0.08}
+{'loss': 0.6987, 'grad_norm': 0.8924965262413025, 'learning_rate': 0.001, 'epoch': 0.15}
+{'loss': 0.6487, 'grad_norm': 0.6449667811393738, 'learning_rate': 0.0015, 'epoch': 0.23}
+{'loss': 0.6237, 'grad_norm': 0.8046383857727051, 'learning_rate': 0.002, 'epoch': 0.3}
+{'loss': 0.5834, 'grad_norm': 0.6627744436264038, 'learning_rate': 0.0025, 'epoch': 0.38}
+{'loss': 0.6146, 'grad_norm': 1.95304536819458, 'learning_rate': 0.003, 'epoch': 0.45}
+{'loss': 0.5485, 'grad_norm': 1.031400203704834, 'learning_rate': 0.0034999999999999996, 'epoch': 0.53}
+{'loss': 0.5299, 'grad_norm': 1.5177282094955444, 'learning_rate': 0.004, 'epoch': 0.6}
+{'loss': 0.5447, 'grad_norm': 1.0140745639801025, 'learning_rate': 0.0045000000000000005, 'epoch': 0.68}
+{'loss': 0.5177, 'grad_norm': 0.8691667318344116, 'learning_rate': 0.005, 'epoch': 0.75}
+{'loss': 0.5166, 'grad_norm': 0.6421509385108948, 'learning_rate': 0.004695121951219512, 'epoch': 0.83}
+{'loss': 0.5271, 'grad_norm': 1.1940126419067383, 'learning_rate': 0.004390243902439025, 'epoch': 0.9}
+{'loss': 0.5219, 'grad_norm': 1.2866435050964355, 'learning_rate': 0.004085365853658537, 'epoch': 0.98}
+ 50% 66/132 [03:23<03:22,  3.07s/it]
   0% 0/13 [00:00<?, ?it/s]
- 15% 2/13 [00:00<00:03,  3.28it/s]
- 23% 3/13 [00:01<00:04,  2.34it/s]
- 31% 4/13 [00:01<00:04,  2.00it/s]
- 38% 5/13 [00:02<00:04,  1.84it/s]
- 46% 6/13 [00:03<00:04,  1.72it/s]
- 54% 7/13 [00:03<00:03,  1.67it/s]
- 62% 8/13 [00:04<00:03,  1.63it/s]
- 69% 9/13 [00:05<00:02,  1.62it/s]
- 77% 10/13 [00:05<00:01,  1.62it/s]
- 85% 11/13 [00:06<00:01,  1.60it/s]
- 92% 12/13 [00:06<00:00,  1.59it/s]
-100% 13/13 [00:07<00:00,  1.69it/s]{'mr': np.float64(114.51698113207547), 'mrr': np.float64(0.335683424139207), 'hits@1': np.float64(0.22641509433962265), 'hits@3': np.float64(0.389937106918239), 'hits@10': np.float64(0.5333333333333333)}
+ 15% 2/13 [00:00<00:03,  3.25it/s]
+ 23% 3/13 [00:01<00:04,  2.29it/s]
+ 31% 4/13 [00:01<00:04,  1.96it/s]
+ 38% 5/13 [00:02<00:04,  1.80it/s]
+ 46% 6/13 [00:03<00:04,  1.69it/s]
+ 54% 7/13 [00:03<00:03,  1.63it/s]
+ 62% 8/13 [00:04<00:03,  1.59it/s]
+ 69% 9/13 [00:05<00:02,  1.59it/s]
+ 77% 10/13 [00:05<00:01,  1.58it/s]
+ 85% 11/13 [00:06<00:01,  1.57it/s]
+ 92% 12/13 [00:07<00:00,  1.56it/s]
+100% 13/13 [00:07<00:00,  1.66it/s]{'mr': np.float64(99.88679245283019), 'mrr': np.float64(0.4014614459293694), 'hits@1': np.float64(0.2981132075471698), 'hits@3': np.float64(0.46163522012578617), 'hits@10': np.float64(0.5849056603773585)}
                                     
-{'eval_loss': 1.2912017107009888, 'eval_mr': 114.51698113207547, 'eval_mrr': 0.335683424139207, 'eval_hits@1': 0.22641509433962265, 'eval_hits@3': 0.389937106918239, 'eval_hits@10': 0.5333333333333333, 'eval_runtime': 8.1257, 'eval_samples_per_second': 50.58, 'eval_steps_per_second': 1.6, 'epoch': 0.99}
- 50% 66/132 [03:27<03:17,  2.99s/it]
-100% 13/13 [00:07<00:00,  1.69it/s]
-{'loss': 0.478, 'grad_norm': 0.44859257340431213, 'learning_rate': 0.003780487804878049, 'epoch': 1.05}
-{'loss': 0.4783, 'grad_norm': 0.6563161015510559, 'learning_rate': 0.0034756097560975606, 'epoch': 1.13}
-{'loss': 0.4633, 'grad_norm': 0.36762335896492004, 'learning_rate': 0.0031707317073170734, 'epoch': 1.2}
-{'loss': 0.4645, 'grad_norm': 0.9570528864860535, 'learning_rate': 0.0028658536585365853, 'epoch': 1.28}
-{'loss': 0.4681, 'grad_norm': 0.3464905917644501, 'learning_rate': 0.0025609756097560977, 'epoch': 1.35}
-{'loss': 0.4766, 'grad_norm': 0.6751734614372253, 'learning_rate': 0.00225609756097561, 'epoch': 1.43}
-{'loss': 0.4553, 'grad_norm': 0.6897686123847961, 'learning_rate': 0.0019512195121951222, 'epoch': 1.5}
-{'loss': 0.4545, 'grad_norm': 0.6835634112358093, 'learning_rate': 0.0016463414634146343, 'epoch': 1.58}
-{'loss': 0.4729, 'grad_norm': 0.6712160706520081, 'learning_rate': 0.0013414634146341464, 'epoch': 1.65}
-{'loss': 0.4712, 'grad_norm': 0.3708733320236206, 'learning_rate': 0.0010365853658536586, 'epoch': 1.73}
-{'loss': 0.4475, 'grad_norm': 0.5246190428733826, 'learning_rate': 0.0007317073170731707, 'epoch': 1.8}
-{'loss': 0.4592, 'grad_norm': 0.8040733337402344, 'learning_rate': 0.000426829268292683, 'epoch': 1.88}
-{'loss': 0.4559, 'grad_norm': 0.43791502714157104, 'learning_rate': 0.00012195121951219514, 'epoch': 1.95}
-100% 132/132 [06:45<00:00,  3.03s/it]
+{'eval_loss': 1.310472011566162, 'eval_mr': 99.88679245283019, 'eval_mrr': 0.4014614459293694, 'eval_hits@1': 0.2981132075471698, 'eval_hits@3': 0.46163522012578617, 'eval_hits@10': 0.5849056603773585, 'eval_runtime': 8.2949, 'eval_samples_per_second': 49.549, 'eval_steps_per_second': 1.567, 'epoch': 0.99}
+ 50% 66/132 [03:32<03:22,  3.07s/it]
+100% 13/13 [00:07<00:00,  1.66it/s]
+{'loss': 0.4729, 'grad_norm': 0.6842078566551208, 'learning_rate': 0.003780487804878049, 'epoch': 1.05}
+{'loss': 0.4724, 'grad_norm': 0.24972641468048096, 'learning_rate': 0.0034756097560975606, 'epoch': 1.13}
+{'loss': 0.4701, 'grad_norm': 0.7499196529388428, 'learning_rate': 0.0031707317073170734, 'epoch': 1.2}
+{'loss': 0.4745, 'grad_norm': 1.203923225402832, 'learning_rate': 0.0028658536585365853, 'epoch': 1.28}
+{'loss': 0.4542, 'grad_norm': 0.67070472240448, 'learning_rate': 0.0025609756097560977, 'epoch': 1.35}
+{'loss': 0.4834, 'grad_norm': 0.7934423685073853, 'learning_rate': 0.00225609756097561, 'epoch': 1.43}
+{'loss': 0.4504, 'grad_norm': 0.9330610632896423, 'learning_rate': 0.0019512195121951222, 'epoch': 1.5}
+{'loss': 0.4527, 'grad_norm': 0.3144013285636902, 'learning_rate': 0.0016463414634146343, 'epoch': 1.58}
+{'loss': 0.4655, 'grad_norm': 0.7253633141517639, 'learning_rate': 0.0013414634146341464, 'epoch': 1.65}
+{'loss': 0.4732, 'grad_norm': 0.3491782546043396, 'learning_rate': 0.0010365853658536586, 'epoch': 1.73}
+{'loss': 0.4481, 'grad_norm': 0.5524656176567078, 'learning_rate': 0.0007317073170731707, 'epoch': 1.8}
+{'loss': 0.469, 'grad_norm': 0.6953290104866028, 'learning_rate': 0.000426829268292683, 'epoch': 1.88}
+{'loss': 0.4573, 'grad_norm': 0.2918236553668976, 'learning_rate': 0.00012195121951219514, 'epoch': 1.95}
+100% 132/132 [06:54<00:00,  3.07s/it]
   0% 0/13 [00:00<?, ?it/s]
- 15% 2/13 [00:00<00:03,  3.30it/s]
- 23% 3/13 [00:01<00:04,  2.32it/s]
- 31% 4/13 [00:01<00:04,  1.99it/s]
- 38% 5/13 [00:02<00:04,  1.83it/s]
- 46% 6/13 [00:03<00:04,  1.71it/s]
- 54% 7/13 [00:03<00:03,  1.66it/s]
- 62% 8/13 [00:04<00:03,  1.62it/s]
- 69% 9/13 [00:05<00:02,  1.61it/s]
- 77% 10/13 [00:05<00:01,  1.61it/s]
- 85% 11/13 [00:06<00:01,  1.60it/s]
- 92% 12/13 [00:06<00:00,  1.59it/s]
-100% 13/13 [00:07<00:00,  1.69it/s]{'mr': np.float64(106.75974842767296), 'mrr': np.float64(0.359022699713005), 'hits@1': np.float64(0.2440251572327044), 'hits@3': np.float64(0.43018867924528303), 'hits@10': np.float64(0.5622641509433962)}
+ 15% 2/13 [00:00<00:03,  3.25it/s]
+ 23% 3/13 [00:01<00:04,  2.31it/s]
+ 31% 4/13 [00:01<00:04,  1.96it/s]
+ 38% 5/13 [00:02<00:04,  1.81it/s]
+ 46% 6/13 [00:03<00:04,  1.69it/s]
+ 54% 7/13 [00:03<00:03,  1.64it/s]
+ 62% 8/13 [00:04<00:03,  1.60it/s]
+ 69% 9/13 [00:05<00:02,  1.59it/s]
+ 77% 10/13 [00:05<00:01,  1.59it/s]
+ 85% 11/13 [00:06<00:01,  1.58it/s]
+ 92% 12/13 [00:07<00:00,  1.57it/s]
+100% 13/13 [00:07<00:00,  1.67it/s]{'mr': np.float64(109.29308176100629), 'mrr': np.float64(0.33447259018700826), 'hits@1': np.float64(0.21635220125786164), 'hits@3': np.float64(0.4037735849056604), 'hits@10': np.float64(0.539622641509434)}
                                      
-{'eval_loss': 2.105942964553833, 'eval_mr': 106.75974842767296, 'eval_mrr': 0.359022699713005, 'eval_hits@1': 0.2440251572327044, 'eval_hits@3': 0.43018867924528303, 'eval_hits@10': 0.5622641509433962, 'eval_runtime': 8.1524, 'eval_samples_per_second': 50.415, 'eval_steps_per_second': 1.595, 'epoch': 1.98}
-100% 132/132 [06:53<00:00,  3.03s/it]
-100% 13/13 [00:07<00:00,  1.69it/s]
-{'train_runtime': 413.2225, 'train_samples_per_second': 20.546, 'train_steps_per_second': 0.319, 'train_loss': 0.5266172845255245, 'epoch': 1.98}
-100% 132/132 [06:53<00:00,  3.13s/it]
+{'eval_loss': 1.993446946144104, 'eval_mr': 109.29308176100629, 'eval_mrr': 0.33447259018700826, 'eval_hits@1': 0.21635220125786164, 'eval_hits@3': 0.4037735849056604, 'eval_hits@10': 0.539622641509434, 'eval_runtime': 8.2622, 'eval_samples_per_second': 49.744, 'eval_steps_per_second': 1.573, 'epoch': 1.98}
+100% 132/132 [07:02<00:00,  3.07s/it]
+100% 13/13 [00:07<00:00,  1.67it/s]
+{'train_runtime': 422.2974, 'train_samples_per_second': 20.104, 'train_steps_per_second': 0.313, 'train_loss': 0.5270236825401132, 'epoch': 1.98}
+100% 132/132 [07:02<00:00,  3.20s/it]
