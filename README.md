@@ -2,7 +2,7 @@
 
 Require Python 3.12
 
-To run this project, please first install all required packages:
+To run this project, please first install all required packages (Colab recommended):
 
 ```
 pip uninstall torch torchvision torchaudio torch-scatter torch-sparse -y
