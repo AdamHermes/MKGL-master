@@ -5,10 +5,14 @@ Require Python 3.12
 To run this project, please first install all required packages:
 
 ```
-pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+pip uninstall torch torchvision torchaudio torch-scatter torch-sparse -y
 ```
 ```
-pip install torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+```
+```
+pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+
 ```
 ```
 pip install -r requirements.txt
