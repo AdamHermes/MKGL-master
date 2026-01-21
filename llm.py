@@ -202,8 +202,28 @@ class KGL4KGC(nn.Module):
                 label[:, target] = 1
                 loss, _ = self.loss(pred, label)
                 pos_pred = pred.gather(-1, target.unsqueeze(-1))
+                
+                # Calculate ranking (existing code)
                 ranking = torch.sum((pos_pred <= pred) & mask, dim=-1) + 1
-                return loss, ranking.to(device)
+                
+                # NEW: Get top-k candidates and scores
+                batch_size = pred.shape[0] // 2  # half for tail, half for head prediction
+                k = min(10, pred.shape[1])  # top-10 or less if fewer entities
+                
+                # Get top-k for tail prediction (first half of batch)
+                tail_pred = pred[:batch_size]
+                tail_scores, tail_indices = torch.topk(tail_pred, k, dim=-1, largest=True)
+                
+                # Get top-k for head prediction (second half of batch)  
+                head_pred = pred[batch_size:]
+                head_scores, head_indices = torch.topk(head_pred, k, dim=-1, largest=True)
+                
+                # Combine (tail predictions followed by head predictions)
+                topk_indices = torch.cat([tail_indices, head_indices], dim=0)
+                topk_scores = torch.cat([tail_scores, head_scores], dim=0)
+                
+                # Return: loss, ranking, top-k indices, top-k scores
+                return loss, ranking.to(device), topk_indices.to(device), topk_scores.to(device)
         
     
     def predict(self, batch, all_loss=None, metric=None):
@@ -260,71 +280,69 @@ class KGL4KGC(nn.Module):
         return pred
     
     def target(self, batch):
-        pos_h_index, pos_t_index, pos_r_index = batch.h_id, batch.t_id, batch.r_id
-        batch_size = len(pos_h_index)
-        
-        # [CRITICAL] This graph must contain Train + Valid + Test edges
-        graph = self.get_eval_graph(batch) 
+        # Positive indices
+        pos_h_index = batch.h_id
+        pos_t_index = batch.t_id
+        pos_r_index = batch.r_id
 
+        batch_size = len(pos_h_index)
         device = pos_h_index.device
+
+        # Get evaluation graph
+        graph = self.get_eval_graph(batch)
         num_nodes = graph.num_nodes
 
+        # Graph edges
         h_all = graph.edge_index[0].to(device)
         t_all = graph.edge_index[1].to(device)
-        r_all = graph.edge_attr.to(device) 
-        
-        batch_range = torch.arange(batch_size, device=device)
+        r_all = graph.edge_attr.to(device)
 
         # -------------------------------------------------
         # 1. TAIL MASK
         # -------------------------------------------------
-        mask_t = (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) & \
-                 (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        
+        mask_t = (
+            (h_all.unsqueeze(1) == pos_h_index.unsqueeze(0)) &
+            (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
+        )
+
         matched_edges_t = mask_t.nonzero(as_tuple=False)
         edge_idx_t = matched_edges_t[:, 0]
-        batch_idx_t = matched_edges_t[:, 1] # Correct Indexing
-        t_truth_index = t_all[edge_idx_t]
-        
-        # LOGIC: 1 = KEEP, 0 = MASK
-        
-        # 1. Init with 1 (Keep Everyone)
-        t_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
-        
-        # 2. Set Matches to 0 (Mask Siblings + Target)
-        t_mask[batch_idx_t, t_truth_index] = 0
+        batch_idx_t = matched_edges_t[:, 1]  # Correct batch index
 
-        # 3. [Safety] Explicitly Set Target to 1 (Keep Target)
-        # This handles the case where the Target was accidentally masked in Step 2
-        t_mask[batch_range, pos_t_index] = 1
+        t_truth_index = t_all[edge_idx_t]
+
+        t_mask = torch.ones(
+            batch_size, num_nodes, dtype=torch.bool, device=device
+        )
+        t_mask[batch_idx_t, t_truth_index] = 0
 
         # -------------------------------------------------
         # 2. HEAD MASK
         # -------------------------------------------------
-        mask_h = (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) & \
-                 (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
-        
+        mask_h = (
+            (t_all.unsqueeze(1) == pos_t_index.unsqueeze(0)) &
+            (r_all.unsqueeze(1) == pos_r_index.unsqueeze(0))
+        )
+
         matched_edges_h = mask_h.nonzero(as_tuple=False)
         edge_idx_h = matched_edges_h[:, 0]
-        batch_idx_h = matched_edges_h[:, 1] # Correct Indexing
+        batch_idx_h = matched_edges_h[:, 1]  # Fixed batch index
+
         h_truth_index = h_all[edge_idx_h]
-        
-        # 1. Init with 1 (Keep Everyone)
-        h_mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
-        
-        # 2. Set Matches to 0 (Mask Siblings + Target)
+
+        h_mask = torch.ones(
+            batch_size, num_nodes, dtype=torch.bool, device=device
+        )
         h_mask[batch_idx_h, h_truth_index] = 0
 
-        # 3. [Safety] Explicitly Set Target to 1 (Keep Target)
-        h_mask[batch_range, pos_h_index] = 1
-
         # -------------------------------------------------
-        # Return
+        # Final mask and target
         # -------------------------------------------------
         mask = torch.cat([t_mask, h_mask], dim=0)
         target = torch.cat([pos_t_index, pos_h_index], dim=0)
 
         return mask, target
+
         
     def predict_and_target(self, batch, all_loss=None, metric=None):
         return self.predict(batch, all_loss, metric), self.target(batch)

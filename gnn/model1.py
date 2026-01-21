@@ -8,9 +8,9 @@ from torchdrug import core, layers
 from torchdrug.layers import functional
 from torchdrug.core import Registry as R
 
-from .util import VirtualTensor, Range, RepeatGraph
-from .util import bincount, variadic_topks
-from .layer import *
+from .util1 import VirtualTensor, Range, RepeatGraph
+from .util1 import bincount, variadic_topks
+from .layer1 import *
 
 @R.register("PNA")
 class PNA(nn.Module, core.Configurable):
