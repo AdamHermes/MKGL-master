@@ -341,6 +341,13 @@ class KGL4KGC(nn.Module):
         self.fact_graph = self.graph.clone()
         self.fact_graph.edge_index = self.graph.edge_index[:, fact_mask]        
         self.fact_graph.edge_attr = self.graph.edge_attr[fact_mask]
+        
+        # Check if dataset has pre-computed hybrid features
+        if hasattr(self.dataset, 'aug_edge_index') and self.dataset.aug_edge_index is not None:
+            self.fact_graph.aug_edge_index = self.dataset.aug_edge_index
+            self.fact_graph.aug_edge_type = self.dataset.aug_edge_type
+            print("✅ Loaded pre-computed augmented edges for hybrid GNN")
+        
         return train_set, valid_set, test_set
 
     def id2tokenid(self, id, split='test', entity=True):
@@ -437,6 +444,18 @@ class KGL4IndKGC(KGL4KGC):
         self.fact_graph = dataset.fact_graph
         self.inductive_graph = dataset.inductive_graph
         self.inductive_fact_graph = dataset.inductive_fact_graph
+        
+        # Check if dataset has pre-computed hybrid features for transductive graph
+        if hasattr(self.dataset, 'trans_aug_edge_index') and self.dataset.trans_aug_edge_index is not None:
+            self.fact_graph.aug_edge_index = self.dataset.trans_aug_edge_index
+            self.fact_graph.aug_edge_type = self.dataset.trans_aug_edge_type
+            print("✅ Loaded pre-computed augmented edges for transductive graph")
+        
+        # Check if dataset has pre-computed hybrid features for inductive graph
+        if hasattr(self.dataset, 'ind_aug_edge_index') and self.dataset.ind_aug_edge_index is not None:
+            self.inductive_fact_graph.aug_edge_index = self.dataset.ind_aug_edge_index
+            self.inductive_fact_graph.aug_edge_type = self.dataset.ind_aug_edge_type
+            print("✅ Loaded pre-computed augmented edges for inductive graph")
 
     def id2tokenid(self, id, split='test', entity=True):
         if entity:

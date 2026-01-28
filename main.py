@@ -25,6 +25,14 @@ from llm import *
 from collector import *
 from preprocess_new import *
 
+# Import hybrid retriever
+try:
+    from hybrid_gnn import HybridScoreRetriever, create_hybrid_retriever
+    HYBRID_AVAILABLE = True
+except ImportError:
+    HYBRID_AVAILABLE = False
+    print("Warning: hybrid_gnn module not available. Using default retriever.")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='data preprocessing')
     parser.add_argument("--config", "-c", type=str,
@@ -77,6 +85,32 @@ if __name__ == "__main__":
 
     kgl2token = torch.tensor(np.stack(dataset.vocab_df.text_token_ids)[:, :cfg.kgl_token_length])     
     model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg) 
+    
+    # Check if hybrid retriever should be used
+    use_hybrid = cfg.score_retriever.get('use_hybrid', False)
+    if use_hybrid and HYBRID_AVAILABLE:
+        if rank == 0:
+            print("=" * 50)
+            print("🚀 Using HybridScoreRetriever (Local PNA + Global GT)")
+            print("=" * 50)
+        
+        # Replace score_retriever with hybrid version
+        device = model.lm_head.weight.device
+        hybrid_retriever = create_hybrid_retriever(
+            config=cfg.score_retriever,
+            text_embeddings=model.lm_head.weight.data,
+            kgl2token=kgl2token,
+            orig_vocab_size=tokenizer.vocab_size,
+        ).to(device)
+        
+        model.score_retriever = hybrid_retriever
+        
+        if rank == 0:
+            hybrid_params = sum(p.numel() for p in hybrid_retriever.parameters())
+            print(f"   Hybrid retriever parameters: {hybrid_params:,}")
+    elif use_hybrid and not HYBRID_AVAILABLE:
+        if rank == 0:
+            print("⚠️ Hybrid retriever requested but not available. Using default.")
     
     if rank == 0:
         print(model.print_trainable_parameters())
