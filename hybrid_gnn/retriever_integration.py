@@ -198,8 +198,15 @@ class HybridScoreRetriever(nn.Module):
         return F.normalize(result, p=2, dim=-1)
     
     def get_text_embeddings(self, all_kgl_index: torch.Tensor) -> torch.Tensor:
-        """Get text embeddings for all entities."""
-        token_ids = self.kgl2token[all_kgl_index.cpu()]
+        """Get text embeddings for all entities.
+        
+        Args:
+            all_kgl_index: KGL token IDs (vocabulary indices), NOT entity indices.
+                           These need to be converted to kgl2token indices by subtracting orig_vocab_size.
+        """
+        # Convert from vocabulary token IDs to kgl2token indices
+        kgl_indices = all_kgl_index - self.orig_vocab_size
+        token_ids = self.kgl2token[kgl_indices.cpu()]
         return self.retrieve_text(token_ids)
     
     def _initialize_sampler(self, text_embs: torch.Tensor):

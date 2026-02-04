@@ -36,11 +36,12 @@ trainer:
   per_device_eval_batch_size: 16
   evaluation_strategy: epoch
   save_strategy: 'no'
-  warmup_steps: 50
+  warmup_ratio: 0.1
   bf16: yes
   logging_steps: 5
   logging_strategy: steps
   learning_rate: 5.0e-3
+  lr_scheduler_type: cosine
   gradient_accumulation_steps: 4
   eval_accumulation_steps: 64
   save_safetensors: no
@@ -48,7 +49,7 @@ trainer:
   label_names:
   - label
   optim: adamw_8bit
-  max_grad_norm: 1.
+  max_grad_norm: 0.5
   ddp_find_unused_parameters: yes
   report_to:
   - tensorboard
@@ -88,10 +89,10 @@ score_retriever:
     num_layers: 6
     num_heads: 4
     num_edge_types: 3
-    k_semantic: 10
-    k_random: 5
+    k_semantic: 8
+    k_random: 2
     use_pearl: yes
-    dropout: 0.1
+    dropout: 0.15
   kg_encoder:
     class: HybridRetriever
     num_relation: 180  # Will be overwritten by dataset

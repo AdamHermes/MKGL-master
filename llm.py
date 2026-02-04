@@ -31,13 +31,19 @@ class MKGL(LlamaForCausalLM):
         device = self.lm_head.weight.device
         self.context_retriever = ContextRetriever(cfg.context_retriever, self.get_input_embeddings().weight.data, kgl2token, orig_vocab_size).to(device)
         
-            
-        self.score_retriever = ScoreRetriever(
-            cfg.score_retriever, 
-            self.lm_head.weight.data, 
-            kgl2token, 
-            orig_vocab_size
-        ).to(device)
+        # Check if hybrid retriever is enabled - if so, skip default ScoreRetriever
+        # It will be created and assigned in main.py
+        use_hybrid = cfg.score_retriever.get('use_hybrid', False)
+        if not use_hybrid:
+            self.score_retriever = ScoreRetriever(
+                cfg.score_retriever, 
+                self.lm_head.weight.data, 
+                kgl2token, 
+                orig_vocab_size
+            ).to(device)
+        else:
+            # Placeholder - will be replaced in main.py
+            self.score_retriever = None
     def _init_kg_score(self, num_kg_tokens, ent_inter_emb_dim=64):
         device = self.lm_head.weight.device
 

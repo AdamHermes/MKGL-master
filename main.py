@@ -94,16 +94,20 @@ if __name__ == "__main__":
             print("🚀 Using HybridScoreRetriever (Local PNA + Global GT)")
             print("=" * 50)
         
+        # Get the base MKGL model (unwrap PEFT wrapper)
+        base_model = model.get_base_model()
+        
         # Replace score_retriever with hybrid version
-        device = model.lm_head.weight.device
+        device = base_model.lm_head.weight.device
         hybrid_retriever = create_hybrid_retriever(
             config=cfg.score_retriever,
-            text_embeddings=model.lm_head.weight.data,
+            text_embeddings=base_model.lm_head.weight.data,
             kgl2token=kgl2token,
             orig_vocab_size=tokenizer.vocab_size,
         ).to(device)
         
-        model.score_retriever = hybrid_retriever
+        # Set on the base model so forward() can access it
+        base_model.score_retriever = hybrid_retriever
         
         if rank == 0:
             hybrid_params = sum(p.numel() for p in hybrid_retriever.parameters())
