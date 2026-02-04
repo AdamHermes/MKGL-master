@@ -1,4 +1,0 @@
-/usr/local/lib/python3.12/dist-packages/torch/functional.py:534: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at ../aten/src/ATen/native/TensorShape.cpp:3595.)
-  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
-100% 1706/1706 [1:42:57<00:00,  3.13s/it]{'mr': np.float64(7862.506841616576), 'mrr': np.float64(0.0004511000535406638), 'hits@1': np.float64(0.0), 'hits@3': np.float64(2.4434344915212823e-05), 'hits@10': np.float64(0.00026877779406734106)}
-100% 1706/1706 [1:42:57<00:00,  3.62s/it]

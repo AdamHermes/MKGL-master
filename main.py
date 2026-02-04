@@ -89,6 +89,7 @@ if __name__ == "__main__":
     
     # Check if hybrid retriever should be used
     use_hybrid = cfg.score_retriever.get('use_hybrid', False)
+    hybrid_retriever = None
     if use_hybrid and HYBRID_AVAILABLE:
         if rank == 0:
             print("=" * 50)
@@ -110,9 +111,18 @@ if __name__ == "__main__":
         # Set on the base model so forward() can access it
         base_model.score_retriever = hybrid_retriever
         
+        # CRITICAL: Also set on the PEFT wrapper so task can access it
+        model.score_retriever = hybrid_retriever
+        
+        # Mark hybrid retriever parameters as trainable (CRITICAL for PEFT)
+        for param in hybrid_retriever.parameters():
+            param.requires_grad = True
+        
         if rank == 0:
             hybrid_params = sum(p.numel() for p in hybrid_retriever.parameters())
+            trainable_params = sum(p.numel() for p in hybrid_retriever.parameters() if p.requires_grad)
             print(f"   Hybrid retriever parameters: {hybrid_params:,}")
+            print(f"   Trainable parameters: {trainable_params:,}")
     elif use_hybrid and not HYBRID_AVAILABLE:
         if rank == 0:
             print("⚠️ Hybrid retriever requested but not available. Using default.")
@@ -127,6 +137,21 @@ if __name__ == "__main__":
     else:
         task = KGL4KGC(cfg.mkgl4kgc, llmodel=model, dataset=dataset)
     
+    # CRITICAL: Register hybrid retriever as a submodule of task for optimizer visibility
+    if use_hybrid and HYBRID_AVAILABLE and hybrid_retriever is not None:
+        # Register as a named module so nn.Module.parameters() finds it
+        task.register_module('hybrid_retriever', hybrid_retriever)
+        if rank == 0:
+            print(f"✅ Hybrid retriever registered with task for training")
+            
+            # Verify it's in task's parameters
+            task_param_ids = {id(p) for p in task.parameters()}
+            hybrid_param_ids = {id(p) for p in hybrid_retriever.parameters()}
+            overlap = len(task_param_ids & hybrid_param_ids)
+            print(f"   Hybrid params visible to optimizer: {overlap} / {len(hybrid_param_ids)}")
+            
+            if overlap < len(hybrid_param_ids):
+                print(f"   ⚠️  WARNING: Only {overlap}/{len(hybrid_param_ids)} hybrid params visible!")
 
     data_loader = MKGLDataCollector(dataset)
     
