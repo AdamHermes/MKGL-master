@@ -278,7 +278,8 @@ class KGL4KGC(nn.Module):
             top_k_scores, top_k_indices = torch.topk(tail_pred_scores, min(self._top_k, tail_pred_scores.size(0)))
             
             top_k_tail_preds = []
-            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.cpu().numpy())):
+            # Convert to float32 before numpy (BFloat16 not supported)
+            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.float().cpu().numpy())):
                 ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
                 pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
                 if self._log_scores:
@@ -304,7 +305,8 @@ class KGL4KGC(nn.Module):
             top_k_scores, top_k_indices = torch.topk(head_pred_scores, min(self._top_k, head_pred_scores.size(0)))
             
             top_k_head_preds = []
-            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.cpu().numpy())):
+            # Convert to float32 before numpy (BFloat16 not supported)
+            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.float().cpu().numpy())):
                 ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
                 pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
                 if self._log_scores:
@@ -621,7 +623,8 @@ class KGL4IndKGC(KGL4KGC):
             top_k_scores, top_k_indices = torch.topk(tail_pred_scores, min(self._top_k, tail_pred_scores.size(0)))
             
             top_k_tail_preds = []
-            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.cpu().numpy())):
+            # Convert to float32 before numpy (BFloat16 not supported)
+            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.float().cpu().numpy())):
                 ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
                 pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
                 if self._log_scores:
@@ -648,7 +651,8 @@ class KGL4IndKGC(KGL4KGC):
             top_k_scores, top_k_indices = torch.topk(head_pred_scores, min(self._top_k, head_pred_scores.size(0)))
             
             top_k_head_preds = []
-            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.cpu().numpy())):
+            # Convert to float32 before numpy (BFloat16 not supported)
+            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.float().cpu().numpy())):
                 ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
                 pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
                 if self._log_scores:
