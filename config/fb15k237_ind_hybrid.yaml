@@ -60,6 +60,13 @@ mkgl4kgc:
   strict_negative: yes
   adversarial_temperature: 0.5
 
+# Prediction logging configuration
+prediction_logging:
+  enabled: yes
+  top_k: 30
+  log_file: outputs/predictions_{config_name}.jsonl
+  log_scores: yes
+
 context_retriever:
   llm_hidden_dim: &llm_hidden_dim 2048
   r: *r

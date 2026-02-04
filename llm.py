@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pandas as pd
 from typing import List, Optional, Tuple, Union, OrderedDict
@@ -157,8 +158,40 @@ class KGL4KGC(nn.Module):
         self.adversarial_temperature = config.adversarial_temperature
         self.strict_negative = config.strict_negative
         
+        # Prediction logging
+        self._log_predictions = False
+        self._top_k = 30
+        self._log_scores = True
+        self._predictions = []
+        
         train_set, valid_set, test_set = dataset.kgdata.split()
         self.preprocess(train_set, valid_set, test_set)
+    
+    def enable_prediction_logging(self, top_k: int = 30, log_scores: bool = True):
+        """Enable logging of top-k predictions for each test query."""
+        self._log_predictions = True
+        self._top_k = top_k
+        self._log_scores = log_scores
+        self._predictions = []
+    
+    def disable_prediction_logging(self):
+        """Disable prediction logging."""
+        self._log_predictions = False
+    
+    def clear_predictions(self):
+        """Clear stored predictions."""
+        self._predictions = []
+    
+    def save_predictions(self, filepath: str, dataset=None):
+        """Save predictions to a JSONL file."""
+        import os
+        os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            for pred in self._predictions:
+                f.write(json.dumps(pred, ensure_ascii=False) + '\n')
+        
+        print(f"\n📊 Saved {len(self._predictions)} predictions to {filepath}")
 
     @property
     def device(self):
@@ -209,7 +242,86 @@ class KGL4KGC(nn.Module):
                 loss, _ = self.loss(pred, label)
                 pos_pred = pred.gather(-1, target.unsqueeze(-1))
                 ranking = torch.sum((pos_pred <= pred) & mask, dim=-1) + 1
+                
+                # Log predictions if enabled
+                if self._log_predictions:
+                    self._log_batch_predictions(batch, pred, mask, target, ranking)
+                
                 return loss, ranking.to(device)
+    
+    def _log_batch_predictions(self, batch, pred, mask, target, ranking):
+        """Log top-k predictions for each query in the batch."""
+        batch_size = len(batch.h_id)
+        device = pred.device
+        
+        # Get entity and relation vocabularies
+        entity_vocab = np.array(self.dataset.kgdata.transductive_vocab)
+        relation_vocab = np.array(self.dataset.kgdata.relation_vocab)
+        
+        # pred shape: [2*batch_size, num_entities]
+        # First batch_size rows: tail prediction (h, r, ?)
+        # Second batch_size rows: head prediction (?, r, t)
+        
+        for i in range(batch_size):
+            # Tail prediction query
+            h_id = batch.h_id[i].item()
+            t_id = batch.t_id[i].item()
+            r_id = batch.r_id[i].item()
+            
+            h_name = entity_vocab[h_id] if h_id < len(entity_vocab) else f"entity_{h_id}"
+            t_name = entity_vocab[t_id] if t_id < len(entity_vocab) else f"entity_{t_id}"
+            r_name = relation_vocab[r_id] if r_id < len(relation_vocab) else f"relation_{r_id}"
+            
+            # Tail prediction: (h, r, ?)
+            tail_pred_scores = pred[i].clone()
+            tail_pred_scores[~mask[i]] = float('-inf')  # Mask out filtered entities
+            top_k_scores, top_k_indices = torch.topk(tail_pred_scores, min(self._top_k, tail_pred_scores.size(0)))
+            
+            top_k_tail_preds = []
+            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.cpu().numpy())):
+                ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
+                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
+                if self._log_scores:
+                    pred_entry["score"] = float(score)
+                top_k_tail_preds.append(pred_entry)
+            
+            self._predictions.append({
+                "query_type": "tail_prediction",
+                "head": h_name,
+                "head_id": h_id,
+                "relation": r_name,
+                "relation_id": r_id,
+                "ground_truth": t_name,
+                "ground_truth_id": t_id,
+                "ranking": int(ranking[i].item()),
+                "top_k_predictions": top_k_tail_preds
+            })
+            
+            # Head prediction: (?, r, t)
+            head_pred_idx = batch_size + i
+            head_pred_scores = pred[head_pred_idx].clone()
+            head_pred_scores[~mask[head_pred_idx]] = float('-inf')
+            top_k_scores, top_k_indices = torch.topk(head_pred_scores, min(self._top_k, head_pred_scores.size(0)))
+            
+            top_k_head_preds = []
+            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.cpu().numpy())):
+                ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
+                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
+                if self._log_scores:
+                    pred_entry["score"] = float(score)
+                top_k_head_preds.append(pred_entry)
+            
+            self._predictions.append({
+                "query_type": "head_prediction",
+                "tail": t_name,
+                "tail_id": t_id,
+                "relation": r_name,
+                "relation_id": r_id,
+                "ground_truth": h_name,
+                "ground_truth_id": h_id,
+                "ranking": int(ranking[head_pred_idx].item()),
+                "top_k_predictions": top_k_head_preds
+            })
         
     
     def predict(self, batch, all_loss=None, metric=None):
@@ -482,3 +594,76 @@ class KGL4IndKGC(KGL4KGC):
 
     def get_eval_graph(self, batch):
         return self.inductive_graph if batch.split == "test" else self.graph
+    
+    def _log_batch_predictions(self, batch, pred, mask, target, ranking):
+        """Log top-k predictions for each query in the batch (inductive version)."""
+        batch_size = len(batch.h_id)
+        
+        # Use correct vocabulary based on split
+        if batch.split == 'test':
+            entity_vocab = np.array(self.dataset.kgdata.inductive_vocab)
+        else:
+            entity_vocab = np.array(self.dataset.kgdata.transductive_vocab)
+        relation_vocab = np.array(self.dataset.kgdata.relation_vocab)
+        
+        for i in range(batch_size):
+            h_id = batch.h_id[i].item()
+            t_id = batch.t_id[i].item()
+            r_id = batch.r_id[i].item()
+            
+            h_name = entity_vocab[h_id] if h_id < len(entity_vocab) else f"entity_{h_id}"
+            t_name = entity_vocab[t_id] if t_id < len(entity_vocab) else f"entity_{t_id}"
+            r_name = relation_vocab[r_id] if r_id < len(relation_vocab) else f"relation_{r_id}"
+            
+            # Tail prediction: (h, r, ?)
+            tail_pred_scores = pred[i].clone()
+            tail_pred_scores[~mask[i]] = float('-inf')
+            top_k_scores, top_k_indices = torch.topk(tail_pred_scores, min(self._top_k, tail_pred_scores.size(0)))
+            
+            top_k_tail_preds = []
+            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.cpu().numpy())):
+                ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
+                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
+                if self._log_scores:
+                    pred_entry["score"] = float(score)
+                top_k_tail_preds.append(pred_entry)
+            
+            self._predictions.append({
+                "query_type": "tail_prediction",
+                "split": batch.split,
+                "head": h_name,
+                "head_id": h_id,
+                "relation": r_name,
+                "relation_id": r_id,
+                "ground_truth": t_name,
+                "ground_truth_id": t_id,
+                "ranking": int(ranking[i].item()),
+                "top_k_predictions": top_k_tail_preds
+            })
+            
+            # Head prediction: (?, r, t)
+            head_pred_idx = batch_size + i
+            head_pred_scores = pred[head_pred_idx].clone()
+            head_pred_scores[~mask[head_pred_idx]] = float('-inf')
+            top_k_scores, top_k_indices = torch.topk(head_pred_scores, min(self._top_k, head_pred_scores.size(0)))
+            
+            top_k_head_preds = []
+            for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.cpu().numpy())):
+                ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
+                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
+                if self._log_scores:
+                    pred_entry["score"] = float(score)
+                top_k_head_preds.append(pred_entry)
+            
+            self._predictions.append({
+                "query_type": "head_prediction",
+                "split": batch.split,
+                "tail": t_name,
+                "tail_id": t_id,
+                "relation": r_name,
+                "relation_id": r_id,
+                "ground_truth": h_name,
+                "ground_truth_id": h_id,
+                "ranking": int(ranking[head_pred_idx].item()),
+                "top_k_predictions": top_k_head_preds
+            })

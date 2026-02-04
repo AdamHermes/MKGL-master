@@ -1,4 +1,5 @@
-import os, sys, logging, argparse, yaml, easydict
+import os, sys, logging, argparse, yaml, easydict, json
+from datetime import datetime
 import os
 os.environ["MPLBACKEND"] = "Agg"   # MUST be before importing matplotlib or torchdrug
 
@@ -156,6 +157,20 @@ if __name__ == "__main__":
 
     removed_columns = ['h_raw', 't_raw', 'r_raw', 'h_fine', 't_fine', 'r_fine', 'inv_r_fine']
 
+    # Configure prediction logging
+    pred_log_cfg = cfg.get('prediction_logging', {})
+    log_predictions = pred_log_cfg.get('enabled', False)
+    top_k = pred_log_cfg.get('top_k', 30)
+    log_scores = pred_log_cfg.get('log_scores', True)
+    
+    if log_predictions:
+        log_file = pred_log_cfg.get('log_file', 'outputs/predictions.jsonl')
+        log_file = log_file.replace('{config_name}', config_name)
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        task.enable_prediction_logging(top_k=top_k, log_scores=log_scores)
+        if rank == 0:
+            print(f"📝 Prediction logging enabled: top-{top_k} predictions will be saved to {log_file}")
+
     trainer = Trainer(
         model=task,
         args=training_args,
@@ -165,5 +180,22 @@ if __name__ == "__main__":
         data_collator=data_loader,
         compute_metrics=compute_metrics
     )
+    
+    # Initial evaluation
     trainer.evaluate()
+    
+    # Save predictions after initial eval if logging is enabled
+    if log_predictions and rank == 0:
+        task.save_predictions(log_file.replace('.jsonl', '_before_train.jsonl'), dataset)
+        task.clear_predictions()
+    
+    # Training
     trainer.train()
+    
+    # Final evaluation after training
+    trainer.evaluate()
+    
+    # Save final predictions
+    if log_predictions and rank == 0:
+        task.save_predictions(log_file.replace('.jsonl', '_after_train.jsonl'), dataset)
+        print(f"✅ Predictions saved to {log_file.replace('.jsonl', '_after_train.jsonl')}")
