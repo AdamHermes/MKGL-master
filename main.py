@@ -129,3 +129,55 @@ if __name__ == "__main__":
     )
     trainer.evaluate()
     trainer.train()
+    # =====================================================
+    # PUT THIS AT THE VERY BOTTOM OF main.py
+    # =====================================================
+    import os
+    import torch
+    import shutil
+    from datetime import datetime
+
+    print("\n" + "="*50)
+    print("🚀 TRAINING COMPLETE. SAVING MODEL TO GOOGLE DRIVE...")
+    print("="*50)
+
+    DRIVE_OUTPUT_DIR = '/content/drive/MyDrive/MKGL_Results'
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"fb15k237_ind_v4_{timestamp}"
+    save_path = f"{DRIVE_OUTPUT_DIR}/{run_name}"
+    os.makedirs(save_path, exist_ok=True)
+
+    weights_path = f"{save_path}/model_weights"
+
+    # 1. Save the PEFT LoRA Adapter
+    print("💾 Saving LoRA adapter weights...")
+    # NOTE: Depending on how your main.py is written, the model might be 
+    # called 'task', 'model', or 'task.llmodel'. 
+    # If 'task.llmodel' throws an error here, change it to 'model' or 'trainer.model'.
+    task.llmodel.save_pretrained(weights_path) 
+
+    # 2. Save the custom MKGL GNN modules
+    print("💾 Saving custom MKGL modules (Context/Score Retrievers)...")
+    base_mkgl = task.llmodel.base_model.model 
+    custom_states = {}
+
+    if hasattr(base_mkgl, 'context_retriever'):
+        custom_states['context_retriever'] = base_mkgl.context_retriever.state_dict()
+    if hasattr(base_mkgl, 'score_retriever'):
+        custom_states['score_retriever'] = base_mkgl.score_retriever.state_dict()
+    if hasattr(base_mkgl, 'kg_score'):
+        custom_states['kg_score'] = base_mkgl.kg_score.state_dict()
+
+    torch.save(custom_states, f"{weights_path}/mkgl_custom_modules.pt")
+
+    # 3. Copy TensorBoard Logs
+    if os.path.exists('./runs'):
+        shutil.copytree('./runs', f'{save_path}/tensorboard_logs', dirs_exist_ok=True)
+
+    # 4. Save the Config
+    # Change the path below to match wherever your config actually lives
+    config_source = './config/fb15k237_ind.yaml' 
+    if os.path.exists(config_source):
+        shutil.copy(config_source, f'{save_path}/config_used.yaml')
+
+    print(f"\n🎉 ALL DONE! Model perfectly saved to: {save_path}")
