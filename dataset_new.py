@@ -37,20 +37,22 @@ class InductiveKnowledgeGraphDataset(Dataset):
         return self._num_transductive_nodes
 
     def _create_pyg_graph(self, triplets, num_nodes, num_relations):
-        if isinstance(triplets, torch.Tensor):
-        # Keep only rows where relation ID is valid
-            mask = (triplets[:, 2] < num_relations) & (triplets[:, 2] >= 0)
-            triplets = triplets[mask]
-        if len(triplets) == 0:
+        # Convert list-of-tuples to tensor exactly once; tensors are passed through as-is.
+        if not isinstance(triplets, torch.Tensor):
+            tensor_triplets = torch.tensor(triplets, dtype=torch.long)
+        else:
+            tensor_triplets = triplets
+
+        if len(tensor_triplets) == 0:
             return Data(edge_index=torch.empty((2, 0), dtype=torch.long),
                         edge_attr=torch.empty(0, dtype=torch.long),
                         num_nodes=num_nodes)
-            
-        tensor_triplets = torch.tensor(triplets, dtype=torch.long)
+
+        # triplets are stored as (h, t, r): col-0 = head, col-1 = tail, col-2 = relation
         edge_index = torch.stack([tensor_triplets[:, 0], tensor_triplets[:, 1]], dim=0)
         edge_attr = tensor_triplets[:, 2]
         x = torch.arange(num_nodes, dtype=torch.long)
-        return Data(x =x,edge_index=edge_index, edge_attr=edge_attr, num_nodes=num_nodes)
+        return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, num_nodes=num_nodes)
 
     def _finalize_vocab(self, inv_vocab):
         sorted_items = sorted(inv_vocab.items(), key=lambda x: x[1])
@@ -112,9 +114,12 @@ class InductiveKnowledgeGraphDataset(Dataset):
                         inv_inductive_vocab[h_token] = len(inv_inductive_vocab)
                     h = inv_inductive_vocab[h_token]
                     
-                    if r_token not in inv_relation_vocab:
-                        # Should exist in transductive, but if not, add it
-                        inv_relation_vocab[r_token] = len(inv_relation_vocab)
+                    # Relations in the inductive split MUST be a subset of those seen
+                    # during transductive training — this is the core inductive KGC contract.
+                    assert r_token in inv_relation_vocab, (
+                        f"Unseen relation '{r_token}' in inductive file '{txt_file}'. "
+                        "Inductive splits may only contain relations seen during transductive training."
+                    )
                     r = inv_relation_vocab[r_token]
                     
                     if t_token not in inv_inductive_vocab:

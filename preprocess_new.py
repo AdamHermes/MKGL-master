@@ -166,8 +166,17 @@ class InductiveKGCDataset(object):
                 for tn in df['token_name'].values
             ]
 
+            # Deduplicate raw_names before building the lookup series.
+            # When transductive and inductive vocabs share a raw_name string,
+            # the Series index would have duplicates, causing lookups to return
+            # a Series instead of a scalar and breaking all downstream assignments.
+            # np.unique picks the first occurrence (lowest token_index), matching
+            # the original preprocess.py behaviour.
+            raw_names_arr = df['raw_name'].values
+            token_index_arr = df['token_index'].values
+            unique_raw_names, first_indices = np.unique(raw_names_arr, return_index=True)
             rawname2tokenid = pd.Series(
-                df['token_index'].values, index=df['raw_name'].values)
+                token_index_arr[first_indices], index=unique_raw_names)
 
             df.set_index('token_index', inplace=True)
             fine_names = [str(n).strip() for n in df['fine_name'].values]
@@ -330,6 +339,7 @@ class KGCDataset(InductiveKGCDataset):
         rel_vocab_df['fine_name'] = rel2text[rel_vocab_df['raw_name'].values].values
 
         inv_rel_vocab_df = rel_vocab_df.iloc[:]
+        inv_rel_vocab_df = inv_rel_vocab_df.copy()  # Avoid SettingWithCopyWarning on mutations below
         inv_rel_vocab_df['kg_id'] += len(inv_rel_vocab_df)
         inv_rel_vocab_df['raw_name'] = self.inv_prefix + \
             inv_rel_vocab_df['raw_name']
@@ -368,8 +378,12 @@ class KGCDataset(InductiveKGCDataset):
                 for tn in df['token_name'].values
             ]
 
+            # Deduplicate raw_names — same rationale as InductiveKGCDataset.
+            raw_names_arr = df['raw_name'].values
+            token_index_arr = df['token_index'].values
+            unique_raw_names, first_indices = np.unique(raw_names_arr, return_index=True)
             rawname2tokenid = pd.Series(
-                df['token_index'].values, index=df['raw_name'].values)
+                token_index_arr[first_indices], index=unique_raw_names)
 
             df.set_index('token_index', inplace=True)
             fine_names = [str(n).strip() for n in df['fine_name'].values]
