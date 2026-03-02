@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import degree
-from .util import  bincount, variadic_topks, to_undirected_with_inverse
+from .util import VirtualTensor, bincount, variadic_topks, to_undirected_with_inverse
 import copy
 from .layer import MLP
 
@@ -127,6 +127,9 @@ class ConditionedPNA(PNA):
         graph.boundary = boundary
         graph.hidden = hidden
         graph.score = score
+
+        graph.visited = torch.zeros(graph.num_nodes, dtype=torch.bool, device=h_index.device)
+        graph.visited[h_index] = True
         
         graph.node_id = torch.arange(graph.num_nodes, device=h_index.device)
         
@@ -189,6 +192,7 @@ class ConditionedPNA(PNA):
             
             new_scores = self.score(graph.hidden[node_out],query[index])         
             graph.score[node_out] = new_scores.type(graph.score[node_out].dtype)
+            graph.visited[node_out] = True
 
         return graph.score
 
@@ -235,12 +239,23 @@ class ConditionedPNA(PNA):
         edge_batch_ids = graph.batch[graph.edge_index[0]]
         total_edges_per_graph = bincount(edge_batch_ids, minlength=graph.num_graphs)
 
+        visited_nodes = torch.nonzero(graph.visited).squeeze(-1)
+        num_visited_per_graph = bincount(graph.batch[visited_nodes], minlength=graph.num_graphs)
+
         ks = (num_nodes_per_graph.float() * node_ratio).long()
         ks = torch.clamp(ks, min=1)
-        ks = torch.min(ks, num_nodes_per_graph)
+        
+        # Cap ks so we don't pick nodes outside the active frontier
+        ks = torch.min(ks, num_visited_per_graph)
 
-        index = variadic_topks(score, num_nodes_per_graph, ks=ks, break_tie=self.break_tie)[1]
+        # Mask out unvisited nodes with -infinity so they are never selected
+        masked_score = score.clone()
+        masked_score[~graph.visited] = -float('inf')
+        
+        # Use the masked_score to pick the top nodes
+        index = variadic_topks(masked_score, num_nodes_per_graph, ks=ks, break_tie=self.break_tie)[1]
         node_in = index 
+        # ------------------------------------------------------------------------------
 
         src_mask = torch.zeros(graph.num_nodes, dtype=torch.bool, device=graph.edge_index.device)
         src_mask[node_in] = True
