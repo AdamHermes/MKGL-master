@@ -69,7 +69,7 @@ class ConditionedPNA(PNA):
         self.break_tie = break_tie
 
         feature_dim = base_layer.output_dim + base_layer.input_dim        
-        self.rel_embedding = nn.Embedding(base_layer.num_relation * 2, base_layer.input_dim)
+        #self.rel_embedding = nn.Embedding(base_layer.num_relation * 2, base_layer.input_dim)
         self.linear = nn.Linear(feature_dim, base_layer.output_dim)
         
         self.mlp = MLP(base_layer.output_dim, [feature_dim] * (num_mlp_layer - 1) + [1])
@@ -101,7 +101,7 @@ class ConditionedPNA(PNA):
         assert (h_index[:, [0]] == h_index).all()
         assert (r_index[:, [0]] == r_index).all()
 
-        rel_embeds = self.rel_embedding(r_index[:, 0]) 
+        rel_embeds = rel_hidden_states
         rel_embeds = rel_embeds.type(hidden_states.dtype)
 
         input_embeds, init_score = self.init_input_embeds(graph, hidden_states, h_index[:, 0], score_text_embs, all_index, rel_embeds)
