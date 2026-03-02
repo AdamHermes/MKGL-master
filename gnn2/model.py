@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import degree
-from .util import VirtualTensor, bincount, variadic_topks, to_undirected_with_inverse
+from .util import  bincount, variadic_topks, to_undirected_with_inverse
 import copy
 from .layer import MLP
 
@@ -69,7 +69,7 @@ class ConditionedPNA(PNA):
         self.break_tie = break_tie
 
         feature_dim = base_layer.output_dim + base_layer.input_dim        
-        #self.rel_embedding = nn.Embedding(base_layer.num_relation * 2, base_layer.input_dim)
+        self.rel_embedding = nn.Embedding(base_layer.num_relation * 2, base_layer.input_dim)
         self.linear = nn.Linear(feature_dim, base_layer.output_dim)
         
         self.mlp = MLP(base_layer.output_dim, [feature_dim] * (num_mlp_layer - 1) + [1])
@@ -100,9 +100,14 @@ class ConditionedPNA(PNA):
         t_index = t_index + node_counts.unsqueeze(-1).to(t_index.device)
         assert (h_index[:, [0]] == h_index).all()
         assert (r_index[:, [0]] == r_index).all()
+        rel_structural_embeds = self.rel_embedding(r_index[:, 0]) 
+        rel_structural_embeds = rel_structural_embeds.type(hidden_states.dtype)
 
-        rel_embeds = rel_hidden_states
-        rel_embeds = rel_embeds.type(hidden_states.dtype)
+        # 2. Add the semantic LLM state (The Hybrid Fix)
+        # Using a residual connection regularizes the LLM's continuous vector
+        rel_embeds = rel_structural_embeds
+        #rel_embeds = self.rel_embedding(r_index[:, 0]) 
+        #rel_embeds = rel_embeds.type(hidden_states.dtype)
 
         input_embeds, init_score = self.init_input_embeds(graph, hidden_states, h_index[:, 0], score_text_embs, all_index, rel_embeds)
         
@@ -157,7 +162,7 @@ class ConditionedPNA(PNA):
             subgraph.hidden = graph.hidden[unique_nodes]
             subgraph.boundary = graph.boundary[unique_nodes]
             subgraph.degree_out = degree(subgraph.edge_index[0], subgraph.num_nodes)
-            subgraph.pna_degree_out = subgraph.degree_out.unsqueeze(-1)
+            subgraph.pna_degree_out = graph.pna_degree_out[unique_nodes]  # Map the PNA degree to the subgraph nodes
             subgraph.pna_degree_mean = pna_degree_mean
             
             # CRITICAL FIX: Keep query as [batch_size, dim], don't expand per-node
@@ -188,14 +193,29 @@ class ConditionedPNA(PNA):
         return graph.score
 
 
-    def init_input_embeds(self, graph, head_embeds, head_index, tail_embeds, tail_index,  rel_embeds):
-        input_embeds = VirtualTensor.zeros(graph.num_nodes, rel_embeds.shape[1], device=rel_embeds.device, dtype=rel_embeds.dtype)
+    def init_input_embeds(self, graph, head_embeds, head_index, tail_embeds, tail_index, rel_embeds):
+        # 1. Initialize the dense node features natively (replaces VirtualTensor.zeros)
+        # This acts as your dynamic 'graph.x' for the KGC query
+        input_embeds = torch.zeros(
+            graph.num_nodes, 
+            rel_embeds.shape[1], 
+            device=rel_embeds.device, 
+            dtype=head_embeds.dtype
+        )
         
-        
+        # Inject the LLM context into the specific head and tail indices
         input_embeds[tail_index] = tail_embeds.type(head_embeds.dtype)
         input_embeds[head_index] = head_embeds
 
-        score = VirtualTensor.gather(self.score(torch.zeros_like(rel_embeds), rel_embeds), graph.node2graph) # zero all
+        # 2. Initialize the heuristic scores natively (replaces VirtualTensor.gather)
+        # Calculate a baseline score for empty nodes in the graph
+        zero_hidden = torch.zeros_like(rel_embeds)
+        base_scores = self.score(zero_hidden, rel_embeds) # Shape: [batch_size]
+        
+        # Broadcast the baseline score to all nodes using PyG's native node2graph mapping
+        score = base_scores[graph.node2graph] # Shape: [num_nodes]
+        
+        # Override the score for the head nodes with their actual contextual embeddings
         score[head_index] = self.score(head_embeds, rel_embeds)
             
         return input_embeds, score
