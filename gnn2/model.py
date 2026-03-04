@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import degree
-from .util import VirtualTensor, bincount, variadic_topks, to_undirected_with_inverse
+from .util import  bincount, variadic_topks, to_undirected_with_inverse
 import copy
 from .layer import MLP
 
@@ -235,28 +235,31 @@ class ConditionedPNA(PNA):
         degree_ratio = self.degree_ratio if self.training else self.test_degree_ratio
         
         num_nodes_per_graph = bincount(graph.batch, minlength=graph.num_graphs)
-        
         edge_batch_ids = graph.batch[graph.edge_index[0]]
         total_edges_per_graph = bincount(edge_batch_ids, minlength=graph.num_graphs)
 
-        visited_nodes = torch.nonzero(graph.visited).squeeze(-1)
-        num_visited_per_graph = bincount(graph.batch[visited_nodes], minlength=graph.num_graphs)
-
-        ks = (num_nodes_per_graph.float() * node_ratio).long()
-        ks = torch.clamp(ks, min=1)
+        # 1. Calculate TARGET sizes based on the full graph
+        # This MUST happen before we look at the frontier so 'es' doesn't shrink to 0
+        base_ks = (num_nodes_per_graph.float() * node_ratio).long()
+        base_ks = torch.clamp(base_ks, min=1)
         
-        # Cap ks so we don't pick nodes outside the active frontier
-        ks = torch.min(ks, num_visited_per_graph)
-
-        # Mask out unvisited nodes with -infinity so they are never selected
-        masked_score = score.clone()
-        masked_score[~graph.visited] = -float('inf')
+        avg_degree = total_edges_per_graph.float() / num_nodes_per_graph.float().clamp(min=1)
+        es = (degree_ratio * base_ks.float() * avg_degree).long()
+        es = torch.clamp(es, min=1)
         
-        # Use the masked_score to pick the top nodes
-        index = variadic_topks(masked_score, num_nodes_per_graph, ks=ks, break_tie=self.break_tie)[1]
-        node_in = index 
-        # ------------------------------------------------------------------------------
+        # 2. Extract the actual active frontier (Perfectly mimics VirtualTensor.keys)
+        node_in = torch.nonzero(graph.visited).squeeze(-1)
+        num_visited_per_graph = bincount(graph.batch[node_in], minlength=graph.num_graphs)
+        
+        # 3. Cap `ks` to the number of nodes currently in the frontier
+        ks = torch.min(base_ks, num_visited_per_graph)
+        
+        # 4. Score and select top-k strictly from the frontier nodes
+        score_in = score[node_in]
+        index = variadic_topks(score_in, num_visited_per_graph, ks=ks, break_tie=self.break_tie)[1]
+        node_in = node_in[index] 
 
+        # 5. Extract the outgoing edges from the selected nodes
         src_mask = torch.zeros(graph.num_nodes, dtype=torch.bool, device=graph.edge_index.device)
         src_mask[node_in] = True
         
@@ -265,14 +268,9 @@ class ConditionedPNA(PNA):
         candidate_edge_batch = graph.batch[graph.edge_index[0][edge_mask_in]]
         num_candidate_edges = bincount(candidate_edge_batch, minlength=graph.num_graphs)
         
-        avg_degree = total_edges_per_graph.float() / num_nodes_per_graph.float().clamp(min=1)
-        es = (degree_ratio * ks.float() * avg_degree).long()
-        
-        es = torch.clamp(es, min=1)
         es = torch.min(es, num_candidate_edges)
 
-    
-        valid_edge_indices = torch.nonzero(edge_mask_in).squeeze()
+        valid_edge_indices = torch.nonzero(edge_mask_in).squeeze(-1)
         
         node_out = graph.edge_index[1][valid_edge_indices]
         score_edge = score[node_out]
