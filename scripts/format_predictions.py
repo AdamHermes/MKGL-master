@@ -125,11 +125,13 @@ def to_readable_text(predictions, top_k=10, show_scores=True, entity_names=None,
         for p in top_preds:
             entity = format_entity_name(p.get('entity', '?'), entity_names)
             rank = p.get('rank', '?')
+            is_gt = p.get('is_ground_truth', False)
+            gt_marker = " ← GROUND TRUTH" if is_gt else ""
             if show_scores and 'score' in p:
                 score = p['score']
-                lines.append(f"        {rank}. {entity} (score: {score:.4f})")
+                lines.append(f"        {rank}. {entity} (score: {score:.4f}){gt_marker}")
             else:
-                lines.append(f"        {rank}. {entity}")
+                lines.append(f"        {rank}. {entity}{gt_marker}")
         
         lines.append("")
     

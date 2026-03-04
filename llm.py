@@ -273,15 +273,23 @@ class KGL4KGC(nn.Module):
             r_name = relation_vocab[r_id] if r_id < len(relation_vocab) else f"relation_{r_id}"
             
             # Tail prediction: (h, r, ?)
+            # target() sets mask=False for ALL known trues INCLUDING ground truth.
+            # Restore ground truth so it can appear in the top-k display.
+            tail_target_i = target[i].item()
             tail_pred_scores = pred[i].clone()
-            tail_pred_scores[~mask[i]] = float('-inf')  # Mask out filtered entities
+            tail_filter_mask = ~mask[i].clone()
+            tail_filter_mask[tail_target_i] = False  # keep ground truth
+            tail_pred_scores[tail_filter_mask] = float('-inf')
             top_k_scores, top_k_indices = torch.topk(tail_pred_scores, min(self._top_k, tail_pred_scores.size(0)))
             
             top_k_tail_preds = []
             # Convert to float32 before numpy (BFloat16 not supported)
             for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.float().cpu().numpy())):
+                if score == float('-inf'):
+                    break
                 ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
-                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
+                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name,
+                              "is_ground_truth": int(idx) == tail_target_i}
                 if self._log_scores:
                     pred_entry["score"] = float(score)
                 top_k_tail_preds.append(pred_entry)
@@ -300,15 +308,21 @@ class KGL4KGC(nn.Module):
             
             # Head prediction: (?, r, t)
             head_pred_idx = batch_size + i
+            head_target_i = target[head_pred_idx].item()
             head_pred_scores = pred[head_pred_idx].clone()
-            head_pred_scores[~mask[head_pred_idx]] = float('-inf')
+            head_filter_mask = ~mask[head_pred_idx].clone()
+            head_filter_mask[head_target_i] = False  # keep ground truth
+            head_pred_scores[head_filter_mask] = float('-inf')
             top_k_scores, top_k_indices = torch.topk(head_pred_scores, min(self._top_k, head_pred_scores.size(0)))
             
             top_k_head_preds = []
             # Convert to float32 before numpy (BFloat16 not supported)
             for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.float().cpu().numpy())):
+                if score == float('-inf'):
+                    break
                 ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
-                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
+                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name,
+                              "is_ground_truth": int(idx) == head_target_i}
                 if self._log_scores:
                     pred_entry["score"] = float(score)
                 top_k_head_preds.append(pred_entry)
@@ -619,14 +633,22 @@ class KGL4IndKGC(KGL4KGC):
             
             # Tail prediction: (h, r, ?)
             tail_pred_scores = pred[i].clone()
-            tail_pred_scores[~mask[i]] = float('-inf')
+            # Mask known trues except ground truth (target() sets mask=False for ALL
+            # known trues including ground truth, so restore it to keep it in top-k)
+            tail_target_i = target[i].item()
+            tail_filter_mask = ~mask[i].clone()
+            tail_filter_mask[tail_target_i] = False
+            tail_pred_scores[tail_filter_mask] = float('-inf')
             top_k_scores, top_k_indices = torch.topk(tail_pred_scores, min(self._top_k, tail_pred_scores.size(0)))
             
             top_k_tail_preds = []
             # Convert to float32 before numpy (BFloat16 not supported)
             for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.float().cpu().numpy())):
+                if score == float('-inf'):
+                    break
                 ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
-                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
+                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name,
+                              "is_ground_truth": int(idx) == tail_target_i}
                 if self._log_scores:
                     pred_entry["score"] = float(score)
                 top_k_tail_preds.append(pred_entry)
@@ -646,15 +668,21 @@ class KGL4IndKGC(KGL4KGC):
             
             # Head prediction: (?, r, t)
             head_pred_idx = batch_size + i
+            head_target_i = target[batch_size + i].item()
             head_pred_scores = pred[head_pred_idx].clone()
-            head_pred_scores[~mask[head_pred_idx]] = float('-inf')
+            head_filter_mask = ~mask[head_pred_idx].clone()
+            head_filter_mask[head_target_i] = False
+            head_pred_scores[head_filter_mask] = float('-inf')
             top_k_scores, top_k_indices = torch.topk(head_pred_scores, min(self._top_k, head_pred_scores.size(0)))
             
             top_k_head_preds = []
             # Convert to float32 before numpy (BFloat16 not supported)
             for j, (idx, score) in enumerate(zip(top_k_indices.cpu().numpy(), top_k_scores.float().cpu().numpy())):
+                if score == float('-inf'):
+                    break
                 ent_name = entity_vocab[idx] if idx < len(entity_vocab) else f"entity_{idx}"
-                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name}
+                pred_entry = {"rank": j + 1, "entity_id": int(idx), "entity": ent_name,
+                              "is_ground_truth": int(idx) == head_target_i}
                 if self._log_scores:
                     pred_entry["score"] = float(score)
                 top_k_head_preds.append(pred_entry)
