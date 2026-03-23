@@ -70,6 +70,11 @@ class ConditionedPNA(PNA):
 
         feature_dim = base_layer.output_dim + base_layer.input_dim        
         self.rel_embedding = nn.Embedding(base_layer.num_relation * 2, base_layer.input_dim)
+        self.rel_fusion = nn.Sequential(
+            nn.Linear(base_layer.input_dim * 2, base_layer.input_dim),
+            nn.LayerNorm(base_layer.input_dim),
+            nn.Tanh(),
+        )
         self.linear = nn.Linear(feature_dim, base_layer.output_dim)
         
         self.mlp = MLP(base_layer.output_dim, [feature_dim] * (num_mlp_layer - 1) + [1])
@@ -100,17 +105,27 @@ class ConditionedPNA(PNA):
         t_index = t_index + node_counts.unsqueeze(-1).to(t_index.device)
         assert (h_index[:, [0]] == h_index).all()
         assert (r_index[:, [0]] == r_index).all()
-        rel_structural_embeds = self.rel_embedding(r_index[:, 0]) 
+        rel_structural_embeds = self.rel_embedding(r_index[:, 0])
         rel_structural_embeds = rel_structural_embeds.type(hidden_states.dtype)
 
-        # 2. Add the semantic LLM state (The Hybrid Fix)
-        # Using a residual connection regularizes the LLM's continuous vector
-        rel_embeds = rel_structural_embeds
-        #rel_embeds = self.rel_embedding(r_index[:, 0]) 
-        #rel_embeds = rel_embeds.type(hidden_states.dtype)
+        # Fuse learned structural relation embeddings with the semantic
+        # relation state coming from the LLM query encoder.
+        rel_semantic_embeds = rel_hidden_states.type(hidden_states.dtype)
+        rel_fused = torch.cat([rel_structural_embeds, rel_semantic_embeds], dim=-1)
+        rel_embeds = self.rel_fusion(rel_fused.float()).to(hidden_states.dtype)
 
-        input_embeds, init_score = self.init_input_embeds(graph, hidden_states, h_index[:, 0], score_text_embs, all_index, rel_embeds)
-        
+        tiled_all_index = (all_index.unsqueeze(0) + node_counts.unsqueeze(1)).flatten()
+        # shape: [N * batch_size]
+
+        # Tile score_text_embs accordingly
+        tiled_score_text_embs = score_text_embs.unsqueeze(0).expand(batch_size, -1, -1).reshape(-1, score_text_embs.shape[-1])
+        # shape: [N * batch_size, r]
+
+        input_embeds, init_score = self.init_input_embeds(
+            graph, hidden_states, h_index[:, 0],
+            tiled_score_text_embs, tiled_all_index,  # <-- use tiled versions
+            rel_embeds
+        )        
         score = self.aggregate(graph, h_index[:, 0], r_index[:, 0], input_embeds, rel_embeds, init_score)
         score = score[t_index]
         return score

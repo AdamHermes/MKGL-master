@@ -88,8 +88,6 @@ class MKGL(LlamaForCausalLM):
         token_embs = self.get_input_embeddings()(input_ids[mask])
         kgl_token_embs = self.context_retriever(input_ids[~mask], graph, all_index, all_kgl_index)
 
-        rel_token_embs = self.context_retriever(r_kgl_tokenid, graph, all_index, all_kgl_index)
-
         input_embs = torch.zeros(
             *input_ids.shape, self.config.hidden_size, dtype=torch.half).to(device)
         input_embs[mask] = token_embs.type(input_embs.dtype)
@@ -117,7 +115,16 @@ class MKGL(LlamaForCausalLM):
             batch_size, device=hidden_states.device), input_length-2]
 
 
-        pred = self.score_retriever(h_id, r_id, t_id, hr_hidden_states, rel_token_embs, graph, all_index, all_kgl_index)
+        pred = self.score_retriever(
+            h_id,
+            r_id,
+            t_id,
+            hr_hidden_states,
+            rel_hidden_states,
+            graph,
+            all_index,
+            all_kgl_index,
+        )
         return pred
 
     def get_input_kg_embeddings(self, kgl_token_ids):
@@ -159,10 +166,11 @@ class KGL4KGC(nn.Module):
         return self.llmodel.lm_head.weight.device
 
     
-    def loss(self, pred, target, all_loss=None):
+    def loss(self, pred, target=None, all_loss=None):
         metric = {}
-        target = torch.zeros_like(pred)
-        target[:, 0] = 1
+        if target is None:
+            target = torch.zeros_like(pred)
+            target[:, 0] = 1
         loss = F.binary_cross_entropy_with_logits(
             pred, target, reduction="none")
 
