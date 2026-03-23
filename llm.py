@@ -88,6 +88,8 @@ class MKGL(LlamaForCausalLM):
         token_embs = self.get_input_embeddings()(input_ids[mask])
         kgl_token_embs = self.context_retriever(input_ids[~mask], graph, all_index, all_kgl_index)
 
+        rel_token_embs = self.context_retriever(r_kgl_tokenid, graph, all_index, all_kgl_index)
+
         input_embs = torch.zeros(
             *input_ids.shape, self.config.hidden_size, dtype=torch.half).to(device)
         input_embs[mask] = token_embs.type(input_embs.dtype)
@@ -121,6 +123,7 @@ class MKGL(LlamaForCausalLM):
             t_id,
             hr_hidden_states,
             rel_hidden_states,
+            rel_token_embs,
             graph,
             all_index,
             all_kgl_index,

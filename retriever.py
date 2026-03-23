@@ -135,19 +135,22 @@ class ScoreRetriever(BasePNARetriever):
             bias=False, dtype=torch.float
         )
 
-    def forward(self, h_id, r_id, t_id, hidden_states, rel_hidden_states, 
+    def forward(self, h_id, r_id, t_id, hidden_states, rel_hidden_states,
+                rel_token_embs,
                 graph, all_index, all_kgl_index):
         
         score_text_embs = super().forward(all_kgl_index)
         
         # Down-scale LLM embeddings to model dimension
         head_embeds = self.h_down_scaling(hidden_states)
-        rel_embeds = self.r_down_scaling(rel_hidden_states)
+        rel_semantic_embeds = self.r_down_scaling(rel_hidden_states)
+        rel_text_embeds = self.r_down_scaling(rel_token_embs)
+        rel_embeds = 0.5 * (rel_semantic_embeds + rel_text_embs)
         
         # Get scores from KG retriever
         score = self.kg_retriever(
             h_id, r_id, t_id, 
-            head_embeds, rel_embeds, 
+            head_embeds, rel_embeds,
             graph, 
             score_text_embs, 
             all_index
