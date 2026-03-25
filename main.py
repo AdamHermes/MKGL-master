@@ -121,7 +121,7 @@ if __name__ == "__main__":
     trainer = Trainer(
         model=task,
         args=training_args,
-        eval_dataset=dataset.valid_data.remove_columns(
+        eval_dataset=dataset.test_data.remove_columns(
             removed_columns),  
         train_dataset=dataset.train_data.remove_columns(removed_columns),
         data_collator=data_loader,
@@ -129,7 +129,6 @@ if __name__ == "__main__":
     )
     trainer.evaluate()
     trainer.train()
-    trainer.evaluate(dataset.test_data.remove_columns(removed_columns))
     # =====================================================
     # PUT THIS AT THE VERY BOTTOM OF main.py
     # =====================================================
