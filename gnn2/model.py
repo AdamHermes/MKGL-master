@@ -157,8 +157,6 @@ class ConditionedPNA(PNA):
 
         for i, layer in enumerate(self.layers):
             edge_id_subset = self.select_edges(graph, graph.score)
-            if edge_id_subset.numel() == 0:
-                continue
            
             sub_edge_index = graph.edge_index[:, edge_id_subset]
             sub_edge_attr = graph.edge_attr[edge_id_subset]
@@ -252,23 +250,16 @@ class ConditionedPNA(PNA):
         degree_ratio = self.degree_ratio if self.training else self.test_degree_ratio
         
         num_nodes_per_graph = bincount(graph.batch, minlength=graph.num_graphs)
-        active_nodes = torch.nonzero(graph.visited, as_tuple=False).flatten()
-        if active_nodes.numel() == 0:
-            return torch.empty(0, dtype=torch.long, device=graph.edge_index.device)
         
         edge_batch_ids = graph.batch[graph.edge_index[0]]
         total_edges_per_graph = bincount(edge_batch_ids, minlength=graph.num_graphs)
 
         ks = (num_nodes_per_graph.float() * node_ratio).long()
         ks = torch.clamp(ks, min=1)
-        active_counts = bincount(graph.batch[active_nodes], minlength=graph.num_graphs)
-        ks = torch.min(ks, active_counts)
-        if ks.sum() == 0:
-            return torch.empty(0, dtype=torch.long, device=graph.edge_index.device)
+        ks = torch.min(ks, num_nodes_per_graph)
 
-        active_scores = score[active_nodes]
-        index = variadic_topks(active_scores, active_counts, ks=ks, break_tie=self.break_tie)[1]
-        node_in = active_nodes[index]
+        index = variadic_topks(score, num_nodes_per_graph, ks=ks, break_tie=self.break_tie)[1]
+        node_in = index 
 
         src_mask = torch.zeros(graph.num_nodes, dtype=torch.bool, device=graph.edge_index.device)
         src_mask[node_in] = True
@@ -277,21 +268,15 @@ class ConditionedPNA(PNA):
         
         candidate_edge_batch = graph.batch[graph.edge_index[0][edge_mask_in]]
         num_candidate_edges = bincount(candidate_edge_batch, minlength=graph.num_graphs)
-        if num_candidate_edges.sum() == 0:
-            return torch.empty(0, dtype=torch.long, device=graph.edge_index.device)
         
         avg_degree = total_edges_per_graph.float() / num_nodes_per_graph.float().clamp(min=1)
         es = (degree_ratio * ks.float() * avg_degree).long()
         
         es = torch.clamp(es, min=1)
         es = torch.min(es, num_candidate_edges)
-        if es.sum() == 0:
-            return torch.empty(0, dtype=torch.long, device=graph.edge_index.device)
 
     
-        valid_edge_indices = torch.nonzero(edge_mask_in, as_tuple=False).flatten()
-        if valid_edge_indices.numel() == 0:
-            return torch.empty(0, dtype=torch.long, device=graph.edge_index.device)
+        valid_edge_indices = torch.nonzero(edge_mask_in).squeeze()
         
         node_out = graph.edge_index[1][valid_edge_indices]
         score_edge = score[node_out]
