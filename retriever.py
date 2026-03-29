@@ -106,17 +106,22 @@ class BasePNARetriever(nn.Module):
         offsets = flat_ids - self.orig_vocab_size
         image_indices = self.image_kgl2index[offsets]
 
-        result = self.missing_image_embedding.expand(flat_ids.shape[0], -1).clone()
+        target_dtype = self.image_down_scaling.weight.dtype
+        result = self.missing_image_embedding.to(dtype=target_dtype).expand(
+            flat_ids.shape[0], -1
+        ).clone()
         valid_mask = image_indices >= 0
         if valid_mask.any():
             valid_indices = image_indices[valid_mask]
             has_feature_mask = self.image_feature_mask[valid_indices]
             if has_feature_mask.any():
                 projected = self.image_down_scaling(
-                    self.image_features[valid_indices[has_feature_mask]].float()
+                    self.image_features[valid_indices[has_feature_mask]].to(
+                        dtype=target_dtype
+                    )
                 )
                 valid_positions = valid_mask.nonzero(as_tuple=False).flatten()
-                result[valid_positions[has_feature_mask]] = projected
+                result[valid_positions[has_feature_mask]] = projected.to(result.dtype)
 
         result = self.norm(result)
         return result.reshape(*image_kgl_ids.shape, -1)
@@ -135,7 +140,7 @@ class BasePNARetriever(nn.Module):
             flat_ids.shape[0],
             self.config.r,
             device=flat_ids.device,
-            dtype=torch.float,
+            dtype=self.down_scaling.weight.dtype,
         )
 
         text_mask = token_types == 1

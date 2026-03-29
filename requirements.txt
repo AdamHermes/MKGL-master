@@ -14,3 +14,5 @@ pyyaml
 tqdm 
 scikit-learn
 h5py
+requests
+Pillow

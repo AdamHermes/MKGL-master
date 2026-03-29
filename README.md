@@ -38,6 +38,34 @@ python preprocess.py -c config/fb15k237_ind.yaml --version v1
 python preprocess.py -c config/wn18rr_ind.yaml --version v1
 ```
 
+### CLIP Image Features
+
+To upgrade the multimodal image branch from legacy VGG features to CLIP features, first build a new H5 file and index from the FB15K URL manifests:
+
+```bash
+python scripts/build_clip_features.py --fp16
+```
+
+This writes:
+
+- `image-graph_urls/FB15K_CLIP_ImageData.h5`
+- `image-graph_urls/FB15K_CLIP_ImageIndex.txt`
+- `image-graph_urls/FB15K_CLIP_Metadata.json`
+
+Then preprocess and train using the CLIP configs:
+
+```bash
+python preprocess_new.py -c config/fb15k237_ind_clip.yaml --version v1
+python main.py -c config/fb15k237_ind_clip.yaml --version v1
+```
+
+For the standard setting:
+
+```bash
+python preprocess_new.py -c config/fb15k237_clip.yaml
+python main.py -c config/fb15k237_clip.yaml
+```
+
 ### Run with Single GPU
 
 If you only has one GPU (better has 80GB memory under the default setting), please run the model with the following command:
