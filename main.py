@@ -40,6 +40,7 @@ if __name__ == "__main__":
         cfg = easydict.EasyDict(yaml.safe_load(f))
         if args.version:
             cfg.dataset.version = args.version
+    cfg.multimodal = get_multimodal_config(cfg)
     torch.manual_seed(args.seed + rank)
 
     config_name = args.config.split('/')[-1].split('.')[0]
@@ -60,12 +61,19 @@ if __name__ == "__main__":
         dataset = InductiveKGCDataset.load(file_path)
     else:
         dataset = KGCDataset.load(file_path)
+    if not hasattr(dataset, "image_vocab_df") or not hasattr(dataset, "rawname2image_tokenid"):
+        raise ValueError(
+            "The preprocessed dataset is missing multimodal image fields. "
+            "Please regenerate it with `python preprocess_new.py -c ...` before running training."
+        )
     tokenizer = dataset.tokenizer
     num_rel = int(dataset.kgdata.num_relation)
     cfg.context_retriever.kg_encoder.num_relation = num_rel
     cfg.context_retriever.kg_encoder.num_relations = num_rel 
     cfg.score_retriever.kg_encoder.num_relation = num_rel
     cfg.score_retriever.kg_encoder.num_relations = num_rel
+    cfg.context_retriever.image_feature_dim = cfg.multimodal.image_feature_dim
+    cfg.score_retriever.image_feature_dim = cfg.multimodal.image_feature_dim
     
     #torch.nn.Module = torch.nn._Module
     config = MKGLConfig.from_pretrained(**cfg.mkglconfig)
@@ -75,8 +83,20 @@ if __name__ == "__main__":
     lora_config = LoraConfig(**cfg.loraconfig)
     model = get_peft_model(model, lora_config)
 
-    kgl2token = torch.tensor(np.stack(dataset.vocab_df.text_token_ids)[:, :cfg.kgl_token_length])     
-    model.init_kg_specs(kgl2token, tokenizer.vocab_size, cfg) 
+    kg_token_tables = build_kg_token_tables(dataset, cfg.kgl_token_length)
+    image_features, image_feature_mask = load_entity_image_features(
+        kg_token_tables["image_raw_names"],
+        cfg.multimodal,
+    )
+    model.init_kg_specs(
+        text_kgl2token=kg_token_tables["text_kgl2token"],
+        kg_token_type=kg_token_tables["kg_token_type"],
+        image_kgl2index=kg_token_tables["image_kgl2index"],
+        image_features=image_features,
+        image_feature_mask=image_feature_mask,
+        orig_vocab_size=tokenizer.vocab_size,
+        cfg=cfg,
+    )
     
     if rank == 0:
         print(model.print_trainable_parameters())

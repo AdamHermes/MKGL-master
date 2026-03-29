@@ -3,6 +3,7 @@ import json
 import os
 import os.path as osp
 import pickle
+from pathlib import Path
 import yaml
 import easydict
 import numpy as np
@@ -13,6 +14,143 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 from dataset_new import FB15k237Inductive, WN18RRInductive, FB15k237, WN18RR
 # Import the PyG datasets we migrated
+
+
+def _default_multimodal_config():
+    return easydict.EasyDict({
+        "use_images": True,
+        "image_dir": "image-graph_urls",
+        "image_index_file": "FB15K_ImageIndex.txt",
+        "image_feature_file": "FB15K_ImageData.h5",
+        "image_feature_dim": 4096,
+        "image_token_prefix": "<img: ",
+    })
+
+
+def get_multimodal_config(cfg=None):
+    multimodal_cfg = _default_multimodal_config()
+    if cfg is None:
+        return multimodal_cfg
+
+    user_cfg = cfg.get("multimodal", {})
+    for key, value in user_cfg.items():
+        multimodal_cfg[key] = value
+    return multimodal_cfg
+
+
+def load_fb15k_image_index(multimodal_cfg):
+    image_dir = Path(multimodal_cfg.image_dir)
+    index_path = image_dir / multimodal_cfg.image_index_file
+    if not index_path.exists():
+        return pd.DataFrame(columns=["raw_name", "image_id"])
+
+    image_index_df = pd.read_csv(
+        index_path,
+        sep="\t",
+        header=None,
+        names=["raw_name", "image_id"],
+        dtype=str,
+    )
+    image_index_df = image_index_df.dropna(subset=["raw_name", "image_id"])
+    return image_index_df
+
+
+def load_entity_image_features(image_raw_names, multimodal_cfg):
+    if not image_raw_names:
+        feature_dim = int(multimodal_cfg.get("image_feature_dim", 4096))
+        return (
+            torch.zeros((0, feature_dim), dtype=torch.float16),
+            torch.zeros(0, dtype=torch.bool),
+        )
+
+    import h5py
+
+    image_index_df = load_fb15k_image_index(multimodal_cfg)
+    image_id_by_raw_name = pd.Series(
+        image_index_df["image_id"].values,
+        index=image_index_df["raw_name"].values,
+    )
+
+    feature_dim = int(multimodal_cfg.get("image_feature_dim", 4096))
+    features = np.zeros((len(image_raw_names), feature_dim), dtype=np.float32)
+    has_image = np.zeros(len(image_raw_names), dtype=bool)
+
+    feature_path = Path(multimodal_cfg.image_dir) / multimodal_cfg.image_feature_file
+    if not feature_path.exists():
+        return (
+            torch.tensor(features, dtype=torch.float16),
+            torch.tensor(has_image, dtype=torch.bool),
+        )
+
+    with h5py.File(feature_path, "r") as h5_file:
+        for row_idx, raw_name in enumerate(image_raw_names):
+            image_id = image_id_by_raw_name.get(raw_name)
+            if image_id is None or image_id not in h5_file:
+                continue
+
+            image_vector = np.asarray(h5_file[image_id], dtype=np.float32).reshape(-1)
+            if image_vector.shape[0] != feature_dim:
+                raise ValueError(
+                    f"Unexpected image feature dim for {raw_name}: "
+                    f"{image_vector.shape[0]} != {feature_dim}"
+                )
+
+            features[row_idx] = image_vector
+            has_image[row_idx] = True
+
+    return (
+        torch.tensor(features, dtype=torch.float16),
+        torch.tensor(has_image, dtype=torch.bool),
+    )
+
+
+def build_kg_token_tables(dataset, kgl_token_length):
+    orig_vocab_size = dataset.tokenizer.vocab_size
+    text_vocab_df = dataset.vocab_df.sort_index()
+    image_vocab_df = getattr(dataset, "image_vocab_df", pd.DataFrame()).sort_index()
+
+    token_ids = []
+    if len(text_vocab_df):
+        token_ids.extend(text_vocab_df.index.tolist())
+    if len(image_vocab_df):
+        token_ids.extend(image_vocab_df.index.tolist())
+
+    if not token_ids:
+        raise ValueError("No KG tokens found in dataset vocabulary.")
+
+    max_token_id = max(token_ids)
+    num_added_tokens = max_token_id - orig_vocab_size + 1
+
+    text_kgl2token = np.zeros((num_added_tokens, kgl_token_length), dtype=np.int64)
+    kg_token_type = np.zeros(num_added_tokens, dtype=np.int64)
+    image_kgl2index = np.full(num_added_tokens, -1, dtype=np.int64)
+
+    for token_id, token_ids_per_name in text_vocab_df["text_token_ids"].items():
+        offset = int(token_id) - orig_vocab_size
+        truncated = np.asarray(token_ids_per_name[:kgl_token_length], dtype=np.int64)
+        text_kgl2token[offset, : len(truncated)] = truncated
+        kg_token_type[offset] = 1
+
+    if len(image_vocab_df):
+        reset_image_vocab_df = image_vocab_df.reset_index()
+        for image_row_idx, row in reset_image_vocab_df.iterrows():
+            offset = int(row["token_index"]) - orig_vocab_size
+            kg_token_type[offset] = 2
+            image_kgl2index[offset] = image_row_idx
+
+        image_raw_names = reset_image_vocab_df["raw_name"].tolist()
+    else:
+        image_raw_names = []
+
+    return {
+        "text_kgl2token": torch.tensor(text_kgl2token, dtype=torch.long),
+        "kg_token_type": torch.tensor(kg_token_type, dtype=torch.long),
+        "image_kgl2index": torch.tensor(image_kgl2index, dtype=torch.long),
+        "image_raw_names": image_raw_names,
+        "orig_vocab_size": orig_vocab_size,
+    }
+
+
 class Prompter(object):
     __slots__ = ("template", "_verbose")
 
@@ -57,10 +195,12 @@ class InductiveKGCDataset(object):
     Wrapper class that takes a raw PyG dataset (kgdata), tokenizes it, 
     and adds the instruction tuning text prompts.
     """
-    def __init__(self, args, kgdata, tokenizer):
+    def __init__(self, args, kgdata, tokenizer, cfg=None):
         self.args = args
         self.kgdata = kgdata
         self.tokenizer = tokenizer
+        self.cfg = cfg
+        self.multimodal_cfg = get_multimodal_config(cfg)
         self.prompter = Prompter('alpaca_short', verbose=False)
         self.inv_prefix = '/inv'
         self.inv_fine_prefix = 'inverse of '
@@ -75,6 +215,7 @@ class InductiveKGCDataset(object):
 
     def read_vocab(self):
         kgdata = self.kgdata
+        enable_images = bool(self.multimodal_cfg.use_images)
 
         # Determine name prefix based on config name
         if 'fb15' in self.args.config_name:
@@ -145,6 +286,8 @@ class InductiveKGCDataset(object):
         rel_vocab_df = rel_vocab_df.groupby('fine_name', group_keys=False).apply(process_overlapped_name)
         # rel_vocab_df = rel_vocab_df.droplevel('fine_name').sort_index()
 
+        self.entity_vocab_df = ent_vocab_df.copy()
+
         ent_vocab_df['entity'] = 1
         rel_vocab_df['entity'] = 0
         vocab_df = pd.concat([ent_vocab_df, rel_vocab_df], ignore_index=True)
@@ -189,6 +332,45 @@ class InductiveKGCDataset(object):
 
         self.vocab_df, self.rawname2tokenid = tokenize_vocab(vocab_df)
 
+        self.image_vocab_df = pd.DataFrame()
+        self.rawname2image_tokenid = pd.Series(dtype=np.int64)
+        if enable_images:
+            image_index_df = load_fb15k_image_index(self.multimodal_cfg)
+            image_id_lookup = pd.Series(
+                image_index_df["image_id"].values,
+                index=image_index_df["raw_name"].values,
+            )
+
+            image_vocab_df = self.entity_vocab_df.drop_duplicates(
+                subset=["raw_name"], keep="first"
+            ).copy()
+            image_vocab_df["entity"] = 1
+            image_vocab_df["image_id"] = image_vocab_df["raw_name"].map(
+                lambda x: image_id_lookup.get(x, None)
+            )
+            image_vocab_df["has_image"] = image_vocab_df["image_id"].notna()
+            image_vocab_df["token_name"] = (
+                self.multimodal_cfg.image_token_prefix + image_vocab_df["fine_name"] + ">"
+            )
+
+            image_tokens = image_vocab_df["token_name"].values.tolist()
+            self.tokenizer.add_tokens(image_tokens)
+            vocab_map = self.tokenizer.get_added_vocab()
+            base_vocab = self.tokenizer.get_vocab()
+            image_vocab_df["token_index"] = [
+                vocab_map.get(token_name, base_vocab.get(token_name, 0))
+                for token_name in image_vocab_df["token_name"].values
+            ]
+
+            image_vocab_df.set_index("token_index", inplace=True)
+            unique_raw_names, first_indices = np.unique(
+                image_vocab_df["raw_name"].values, return_index=True
+            )
+            self.rawname2image_tokenid = pd.Series(
+                image_vocab_df.index.values[first_indices], index=unique_raw_names
+            )
+            self.image_vocab_df = image_vocab_df
+
     def read_data(self):
         kgdata = self.kgdata
         # PyG Dataset.split() returns a list of Subsets
@@ -222,6 +404,9 @@ class InductiveKGCDataset(object):
             # Inverse relation logic
             inv_r_raw = self.inv_prefix + df['r_raw'].values
             df['inv_r_tokenid'] = self.rawname2tokenid[inv_r_raw].values
+            if len(self.rawname2image_tokenid):
+                df['h_img_tokenid'] = self.rawname2image_tokenid[df['h_raw'].values].values
+                df['t_img_tokenid'] = self.rawname2image_tokenid[df['t_raw'].values].values
 
             # Map token IDs to fine descriptions
             # Using reindex or loc
@@ -252,23 +437,45 @@ class InductiveKGCDataset(object):
             t_info = vocab_df.loc[row['t_tokenid']]
             r_info = vocab_df.loc[row['r_tokenid']]
             inv_r_info = vocab_df.loc[row['inv_r_tokenid']]
+            h_img_info = self.image_vocab_df.loc[row['h_img_tokenid']]
+            t_img_info = self.image_vocab_df.loc[row['t_img_tokenid']]
 
+            h_img = h_img_info['token_name']
             h = h_info['token_name']
+            t_img = t_img_info['token_name']
             t = t_info['token_name']
             r = r_info['token_name']
             inv_r = inv_r_info['token_name']
 
+            h_img_des = f'Visual representation of {h_info["fine_name"]}'
             h_des = h_info['fine_name']
+            t_img_des = f'Visual representation of {t_info["fine_name"]}'
             t_des = t_info['fine_name']
             r_des = r_info['fine_name']
             inv_r_des = inv_r_info['fine_name']
 
-            instruction = f'Suppose that you are an excellent linguist studying a three-word language. Given the following dictionary:\n\n Input\tType\tDescription\n{h}\tHead entity\t{h_des}\n{r}\tRelation\t{r_des}\n\nPlease complete the last word (?) of the sentence: {h}{r}?'
-            inv_instruction = f'Suppose that you are an excellent linguist studying a three-word language. Given the following dictionary:\n\n Input\tType\tDescription\n{t}\tHead entity\t{t_des}\n{inv_r}\tRelation\t{inv_r_des}\n\nPlease complete the last word (?) of the sentence: {t}{inv_r}?'
+            instruction = (
+                "Suppose that you are an excellent linguist studying a three-word language. "
+                "Given the following multimodal dictionary:\n\n"
+                " Input\tType\tDescription\n"
+                f"{h_img}\tHead image\t{h_img_des}\n"
+                f"{h}\tHead entity\t{h_des}\n"
+                f"{r}\tRelation\t{r_des}\n\n"
+                f"Please complete the multimodal phrase: {h_img}{h}{r}?"
+            )
+            inv_instruction = (
+                "Suppose that you are an excellent linguist studying a three-word language. "
+                "Given the following multimodal dictionary:\n\n"
+                " Input\tType\tDescription\n"
+                f"{t_img}\tHead image\t{t_img_des}\n"
+                f"{t}\tHead entity\t{t_des}\n"
+                f"{inv_r}\tRelation\t{inv_r_des}\n\n"
+                f"Please complete the multimodal phrase: {t_img}{t}{inv_r}?"
+            )
 
-            row['input_text'] = self.prompter.generate_prompt(instruction, label=f'{h}{r}')
+            row['input_text'] = self.prompter.generate_prompt(instruction, label=f'{h_img}{h}{r}')
             row['inv_input_text'] = self.prompter.generate_prompt(
-                inv_instruction, label=f'{t}{inv_r}')
+                inv_instruction, label=f'{t_img}{t}{inv_r}')
 
             return row
 
@@ -311,6 +518,7 @@ class KGCDataset(InductiveKGCDataset):
     """
     def read_vocab(self):
         kgdata = self.kgdata
+        enable_images = bool(self.multimodal_cfg.use_images)
         
         # Similar name prefix logic
         if 'fb15' in self.args.config_name:
@@ -358,6 +566,8 @@ class KGCDataset(InductiveKGCDataset):
         ent_vocab_df = ent_vocab_df.groupby('fine_name', group_keys=False).apply(process_overlapped_name)
         rel_vocab_df = rel_vocab_df.groupby('fine_name', group_keys=False).apply(process_overlapped_name)
 
+        self.entity_vocab_df = ent_vocab_df.copy()
+
         ent_vocab_df['entity'] = 1
         rel_vocab_df['entity'] = 0
         vocab_df = pd.concat([ent_vocab_df, rel_vocab_df], ignore_index=True)
@@ -395,6 +605,45 @@ class KGCDataset(InductiveKGCDataset):
             return df, rawname2tokenid
 
         self.vocab_df, self.rawname2tokenid = tokenize_vocab(vocab_df)
+
+        self.image_vocab_df = pd.DataFrame()
+        self.rawname2image_tokenid = pd.Series(dtype=np.int64)
+        if enable_images:
+            image_index_df = load_fb15k_image_index(self.multimodal_cfg)
+            image_id_lookup = pd.Series(
+                image_index_df["image_id"].values,
+                index=image_index_df["raw_name"].values,
+            )
+
+            image_vocab_df = self.entity_vocab_df.drop_duplicates(
+                subset=["raw_name"], keep="first"
+            ).copy()
+            image_vocab_df["entity"] = 1
+            image_vocab_df["image_id"] = image_vocab_df["raw_name"].map(
+                lambda x: image_id_lookup.get(x, None)
+            )
+            image_vocab_df["has_image"] = image_vocab_df["image_id"].notna()
+            image_vocab_df["token_name"] = (
+                self.multimodal_cfg.image_token_prefix + image_vocab_df["fine_name"] + ">"
+            )
+
+            image_tokens = image_vocab_df["token_name"].values.tolist()
+            self.tokenizer.add_tokens(image_tokens)
+            vocab_map = self.tokenizer.get_added_vocab()
+            base_vocab = self.tokenizer.get_vocab()
+            image_vocab_df["token_index"] = [
+                vocab_map.get(token_name, base_vocab.get(token_name, 0))
+                for token_name in image_vocab_df["token_name"].values
+            ]
+
+            image_vocab_df.set_index("token_index", inplace=True)
+            unique_raw_names, first_indices = np.unique(
+                image_vocab_df["raw_name"].values, return_index=True
+            )
+            self.rawname2image_tokenid = pd.Series(
+                image_vocab_df.index.values[first_indices], index=unique_raw_names
+            )
+            self.image_vocab_df = image_vocab_df
     
     def read_data(self):
         # Override to ensure we look at the right vocab for all splits
@@ -418,6 +667,9 @@ class KGCDataset(InductiveKGCDataset):
             df['t_tokenid'] = self.rawname2tokenid[df['t_raw'].values].values
             df['r_tokenid'] = self.rawname2tokenid[df['r_raw'].values].values
             df['inv_r_tokenid'] = self.rawname2tokenid[self.inv_prefix + df['r_raw'].values].values
+            if len(self.rawname2image_tokenid):
+                df['h_img_tokenid'] = self.rawname2image_tokenid[df['h_raw'].values].values
+                df['t_img_tokenid'] = self.rawname2image_tokenid[df['t_raw'].values].values
 
             df['h_fine'] = self.vocab_df.loc[df['h_tokenid'].values, 'fine_name'].values
             df['t_fine'] = self.vocab_df.loc[df['t_tokenid'].values, 'fine_name'].values
@@ -505,6 +757,6 @@ if __name__ == "__main__":
     
     if kgdata:
         if is_inductive:
-            dataset = InductiveKGCDataset(args, kgdata, tokenizer)
+            dataset = InductiveKGCDataset(args, kgdata, tokenizer, cfg)
         else:
-            dataset = KGCDataset(args, kgdata, tokenizer)
+            dataset = KGCDataset(args, kgdata, tokenizer, cfg)

@@ -24,18 +24,48 @@ class MKGL(LlamaForCausalLM):
     def __init__(self, config):
         super().__init__(config)
 
-    def init_kg_specs(self, kgl2token, orig_vocab_size, cfg): 
-        self.kgl2token = kgl2token
+    def init_kg_specs(
+        self,
+        text_kgl2token,
+        kg_token_type,
+        image_kgl2index,
+        image_features,
+        image_feature_mask,
+        orig_vocab_size,
+        cfg,
+    ):
+        self.text_kgl2token = text_kgl2token
+        self.kg_token_type = kg_token_type
+        self.image_kgl2index = image_kgl2index
         self.orig_vocab_size = orig_vocab_size
         
         device = self.lm_head.weight.device
-        self.context_retriever = ContextRetriever(cfg.context_retriever, self.get_input_embeddings().weight.data, kgl2token, orig_vocab_size).to(device)
+        text_kgl2token = text_kgl2token.to(device)
+        kg_token_type = kg_token_type.to(device)
+        image_kgl2index = image_kgl2index.to(device)
+        image_features = image_features.to(device)
+        image_feature_mask = image_feature_mask.to(device)
+
+        self.context_retriever = ContextRetriever(
+            cfg.context_retriever,
+            self.get_input_embeddings().weight.data,
+            text_kgl2token,
+            kg_token_type,
+            image_kgl2index,
+            image_features,
+            image_feature_mask,
+            orig_vocab_size,
+        ).to(device)
         
             
         self.score_retriever = ScoreRetriever(
             cfg.score_retriever, 
             self.lm_head.weight.data, 
-            kgl2token, 
+            text_kgl2token,
+            kg_token_type,
+            image_kgl2index,
+            image_features,
+            image_feature_mask,
             orig_vocab_size
         ).to(device)
     def _init_kg_score(self, num_kg_tokens, ent_inter_emb_dim=64):
@@ -63,11 +93,13 @@ class MKGL(LlamaForCausalLM):
         h_id,
         r_id,
         t_id,
-        h_kgl_tokenid,
+        h_text_kgl_tokenid,
+        h_image_kgl_tokenid,
         r_kgl_tokenid,
         graph,
         all_index,
-        all_kgl_index,
+        all_text_kgl_index,
+        all_image_kgl_index,
         input_ids,
         attention_mask,
         input_length,
@@ -81,14 +113,14 @@ class MKGL(LlamaForCausalLM):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        batch_size = h_kgl_tokenid.shape[0]
+        batch_size = h_text_kgl_tokenid.shape[0]
         device = self.lm_head.weight.device
 
         mask = input_ids < self.orig_vocab_size
         token_embs = self.get_input_embeddings()(input_ids[mask])
-        kgl_token_embs = self.context_retriever(input_ids[~mask], graph, all_index, all_kgl_index)
+        kgl_token_embs = self.context_retriever(input_ids[~mask])
 
-        rel_token_embs = self.context_retriever(r_kgl_tokenid, graph, all_index, all_kgl_index)
+        rel_token_embs = self.context_retriever(r_kgl_tokenid)
 
         input_embs = torch.zeros(
             *input_ids.shape, self.config.hidden_size, dtype=torch.half).to(device)
@@ -110,14 +142,25 @@ class MKGL(LlamaForCausalLM):
         hidden_states = transformer_outputs[0]
 
         # select the last output of llm, batch_size x hidden_size
-        hr_hidden_states = hidden_states[torch.arange(
-            batch_size, device=hidden_states.device), input_length-1]
+        entity_image_hidden_states = hidden_states[torch.arange(
+            batch_size, device=hidden_states.device), input_length-3]
 
-        rel_hidden_states = hidden_states[torch.arange(
+        entity_text_hidden_states = hidden_states[torch.arange(
             batch_size, device=hidden_states.device), input_length-2]
 
-
-        pred = self.score_retriever(h_id, r_id, t_id, hr_hidden_states, rel_token_embs, graph, all_index, all_kgl_index)
+        pred = self.score_retriever(
+            h_id,
+            r_id,
+            t_id,
+            entity_text_hidden_states,
+            entity_image_hidden_states,
+            h_image_kgl_tokenid,
+            rel_token_embs,
+            graph,
+            all_index,
+            all_text_kgl_index,
+            all_image_kgl_index,
+        )
         return pred
 
     def get_input_kg_embeddings(self, kgl_token_ids):
@@ -215,7 +258,8 @@ class KGL4KGC(nn.Module):
      
 
         all_index = torch.arange(graph.num_nodes, device=device)
-        all_kgl_index = self.id2tokenid(all_index, split=batch.split)
+        all_text_kgl_index = self.id2tokenid(all_index, split=batch.split)
+        all_image_kgl_index = self.id2imagetokenid(all_index, split=batch.split)
         
         if self.training:
             neg_index = self._strict_negative(
@@ -239,7 +283,8 @@ class KGL4KGC(nn.Module):
             r_id = torch.cat([r_index, r_index])
             t_id = torch.cat([t_index, it_index])
             
-        h_kgl_tokenid = torch.cat([batch.h_tokenid, batch.t_tokenid])
+        h_text_kgl_tokenid = torch.cat([batch.h_tokenid, batch.t_tokenid])
+        h_image_kgl_tokenid = torch.cat([batch.h_img_tokenid, batch.t_img_tokenid])
         r_kgl_tokenid = torch.cat([batch.r_tokenid, batch.inv_r_tokenid])
         input_ids = batch.input_ids
         attention_mask = batch.attention_mask
@@ -248,11 +293,13 @@ class KGL4KGC(nn.Module):
         pred = self.llmodel(h_id,
                             r_id,
                             t_id,
-                            h_kgl_tokenid,
+                            h_text_kgl_tokenid,
+                            h_image_kgl_tokenid,
                             r_kgl_tokenid,
                             graph,
                             all_index,
-                            all_kgl_index,
+                            all_text_kgl_index,
+                            all_image_kgl_index,
                             input_ids,
                             attention_mask,
                             input_length,
@@ -359,6 +406,15 @@ class KGL4KGC(nn.Module):
     def get_eval_graph(self, batch):
         return self.graph
 
+    def id2imagetokenid(self, id, split='test'):
+        if split == 'test' and hasattr(self.dataset.kgdata, 'inductive_vocab') and len(self.dataset.kgdata.inductive_vocab):
+            id2rawname = np.array(self.dataset.kgdata.inductive_vocab)
+        else:
+            id2rawname = np.array(self.dataset.kgdata.transductive_vocab)
+        rawname = id2rawname[id.cpu()]
+        tokenid = np.stack([self.dataset.rawname2image_tokenid.loc[n] for n in rawname])
+        return torch.tensor(tokenid, dtype=id.dtype, device=id.device)
+
     @torch.no_grad()
     def _strict_negative(self, pos_h_index, pos_t_index, pos_r_index):
         batch_size = pos_h_index.size(0)
@@ -457,3 +513,12 @@ class KGL4IndKGC(KGL4KGC):
 
     def get_eval_graph(self, batch):
         return self.inductive_graph if batch.split == "test" else self.graph
+
+    def id2imagetokenid(self, id, split='test'):
+        if split == 'test':
+            id2rawname = np.array(self.dataset.kgdata.inductive_vocab)
+        else:
+            id2rawname = np.array(self.dataset.kgdata.transductive_vocab)
+        rawname = id2rawname[id.cpu()]
+        tokenid = np.stack([self.dataset.rawname2image_tokenid.loc[n] for n in rawname])
+        return torch.tensor(tokenid, dtype=id.dtype, device=id.device)
